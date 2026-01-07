@@ -1,7 +1,14 @@
 import ROOT
 import numpy as np
 
-def generate_toys(Npoints, output_file, N=int(1e4)):
+# linear transformation to pass from (alpha,beta)==true params -> (x,y)==observation params
+# should be small, so the output distributuion is similar in sim and data, to recycle the toy MC generation of both data and sim
+def transform_xy(x,y):
+    xp = 1.10*x + 0.05
+    yp = 1.06*y + 0.08
+    return (xp,yp)
+
+def generate_toys(Npoints, output_file, isdata=False, N=int(1e4)):
 
     f = ROOT.TFile(output_file, "RECREATE")
     h2 = ROOT.TH2D("h2","dummy 2D vars", 100, -3, 7, 100, -5, 5)
@@ -14,8 +21,12 @@ def generate_toys(Npoints, output_file, N=int(1e4)):
 
     for ix,x in enumerate(xarr):
         for iy,y in enumerate(yarr):
+            if isdata:
+                x,y = transform_xy(x,y)
+
             histos.append(h2.Clone(f"h2_{ix}_{iy}"))
             histos[-1].SetTitle(f"(x,y) = ({x:.2f},{y:.2f})")
+
             
             # -------------------------
             # Medie (polinomi in x,y)
@@ -55,17 +66,17 @@ def generate_toys(Npoints, output_file, N=int(1e4)):
 
     f.Close()
 
-    print("Istogramma TH2D scritto in output_h2.root")
+    print(f"Istogramma TH2D scritto in {output_file}")
 
 if __name__ == "__main__":
 
     toy_sim = "toy_simulation.root"
     print(f"Simulate the 'simulation' and store in the file {toy_sim}")
-    generate_toys(11,toy_sim)
+    generate_toys(11,toy_sim,false)
 
     toy_data = "toy_data.root"
     print(f"Simulate the 'data' and store in the file {toy_data}")
-    generate_toys(1,toy_data)
+    generate_toys(5,toy_data,True)
 
     print("DONE")
     
