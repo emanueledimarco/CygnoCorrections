@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import random
 from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
 
@@ -82,3 +83,52 @@ class TH2FlowDataset(Dataset):
         hist = self.source_hists[xy]
         N = int(hist.GetEntries())
         return sample_from_th2(hist, N)
+
+# The following if there are two distributions:
+# source_hists[(alpha,beta)] (lambda_ass,alpha)
+# target_hists[(x,y)] (P,T)
+# unknown relationship among (alpha,beta) <=> (x,y)
+
+class TH2UnpairedTransportDataset(Dataset):
+    def __init__(
+        self,
+        source_hists,   # dict[(alpha,beta)] -> TH2D
+        target_hists,   # dict[(x,y)] -> TH2D
+        batch_size=32
+    ):
+        self.source_keys = list(source_hists.keys())
+        self.target_keys = list(target_hists.keys())
+
+        self.source_hists = source_hists
+        self.target_hists = target_hists
+
+        self.batch_size = batch_size
+
+    def __len__(self):
+        # lunghezza fittizia
+        return 20000
+
+    def __getitem__(self, idx):
+        # 1) scegli UNA simulazione a caso
+        alpha, beta = random.choice(self.source_keys)
+        h_src = self.source_hists[(alpha, beta)]
+
+        # 2) scegli UN contesto dati a caso
+        x, y = random.choice(self.target_keys)
+        h_tgt = self.target_hists[(x, y)]
+
+        # 3) campiona eventi
+        A_src = sample_from_th2(h_src, self.batch_size)
+        A_tgt = sample_from_th2(h_tgt, self.batch_size)
+
+        # 4) contesto completo (alpha,beta,x,y)
+        context = torch.tensor(
+            [alpha, beta, x, y],
+            dtype=torch.float32
+        ).repeat(self.batch_size, 1)
+
+        return {
+            "A_src": A_src,       # [B,2]
+            "A_tgt": A_tgt,       # [B,2]
+            "context": context    # [B,4]
+        }

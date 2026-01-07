@@ -9,6 +9,19 @@ from HistFlowDataset import *
 def pair_grid(x,y,Ny):
     return x * Ny + y
 
+def plot_dataset(DS,pname="A_out"):
+
+    h_out = ROOT.TH2D("out", "out",
+                      100, -3, 7,
+                      100, -5, 5)
+    
+    A = DS.cpu().numpy()
+    for x, y in A:
+        h_out.Fill(x, y)
+
+    c = ROOT.TCanvas("c","",600,600)
+    h_out.Draw("colz")
+    c.SaveAs(f"{pname}.pdf")
 
 class ConditionalAffineCoupling(nn.Module):
     def __init__(self, dim, cond_dim, hidden=64, mask=None):
@@ -75,13 +88,19 @@ class ConditionalFlow(nn.Module):
         return x
 
 
-class XYEmbedding(nn.Module):
-    def __init__(self, n_xy, emb_dim):
+class ContextEncoder(torch.nn.Module):
+    def __init__(self, context_dim=4, emb_dim=16):
         super().__init__()
-        self.emb = nn.Embedding(n_xy, emb_dim)
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(context_dim, 32),
+            torch.nn.ReLU(),
+            torch.nn.Linear(32, emb_dim),
+        )
 
-    def forward(self, xy_id):
-        return self.emb(xy_id)
+    def forward(self, context):
+        # context: [B, 4] = (α, β, x, y)
+        return self.net(context)
+
 
 def mmd_loss(x, y, sigma=1.0):
     """
@@ -103,44 +122,23 @@ def mmd_loss(x, y, sigma=1.0):
     # MMD^2
     return k_xx.mean() + k_yy.mean() - 2 * k_xy.mean()
 
-def train_step(
-    flow,
-    embedder,
-    optimizer,
-    A_src,
-    A_tgt,
-    xy_id,
-    lambda_id=0.1,
-    sigma_mmd=1.0
-):
-    """
-    flow:      ConditionalFlow
-    embedder:  XYEmbedding
-    optimizer: torch.optim.Optimizer
-    A_src:     [B,2] float tensor
-    A_tgt:     [B,2] float tensor
-    xy_id:     [B]   long tensor
-    """
 
-    # 1) ottieni embedding (x,y)
-    cond = embedder(xy_id)
+def train_step(flow, context_encoder, opt, batch):
+    A_src = batch["A_src"]
+    A_tgt = batch["A_tgt"]
+    context = batch["context"]
 
-    # 2) applica il flow
+    cond = context_encoder(context)
     A_out = flow(A_src, cond)
 
-    # 3) MMD loss (matching distribuzioni)
-    loss_mmd = mmd_loss(A_out, A_tgt, sigma=sigma_mmd)
+    loss_mmd = mmd_loss(A_out, A_tgt)
+    loss_id  = ((A_out - A_src)**2).mean()
 
-    # 4) Identity regularization
-    loss_id = ((A_out - A_src) ** 2).mean()
+    loss = loss_mmd + 0.1 * loss_id
 
-    # 5) Loss totale
-    loss = loss_mmd + lambda_id * loss_id
-
-    # 6) Backprop
-    optimizer.zero_grad()
+    opt.zero_grad()
     loss.backward()
-    optimizer.step()
+    opt.step()
 
     return loss.item(), loss_mmd.item(), loss_id.item()
 
@@ -150,99 +148,74 @@ if __name__ == "__main__":
     toy_data = ROOT.TFile.Open("toy_data.root")
 
     source_hists = {}
-    xy_to_id = {}
+    target_hists = {}
     
+    # simulation distributions
     Nx=11
     Ny=11
     for ix in range(Nx):
         for iy in range(Ny):
             source_hists[(ix,iy)] = toy_sim.Get(f"h2_{ix}_{iy}")
-            xy_to_id[(ix,iy)] = pair_grid(ix,iy,Ny)
 
-    target_hist = toy_data.Get(f"h2_0_0")
+    # data distributions
+    Na=5
+    Nb=5
+    for ia in range(Na):
+        for ib in range(Nb):
+            target_hists[(ia,ib)] = toy_data.Get(f"h2_{ia}_{ib}")
 
-    #test_sampling(source_hists[(0,0)])
-    
-    dataset = TH2FlowDataset(
+    dataset = TH2UnpairedTransportDataset(
         source_hists,
-        target_hist,
-        xy_to_id,
+        target_hists,
         batch_size=32
     )
     
-    loader = DataLoader(dataset, batch_size=None)
+    loader = DataLoader(dataset, batch_size=None, shuffle=True)
 
+    context_encoder = ContextEncoder(context_dim=4, emb_dim=16)
+    flow = ConditionalFlow(dim=2, cond_dim=16)
 
-    # creare il modello
-    n_xy = len(xy_to_id) # number of pairs of sim params
-
-    # Embedder
-    emb_dim = 12 # to be optimized
-    embedder = XYEmbedding(
-        n_xy=n_xy,
-        emb_dim=emb_dim
-    )
-
-    # Flow
-    flow = ConditionalFlow(
-        dim=2,
-        cond_dim=emb_dim
-    )
-
-    # Device (testd on CPU only)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    flow.to(device)
-    embedder.to(device)
-
-    # Optimizer (both flow and embedder parameters)
+    # Optimizer
     opt = torch.optim.Adam(
-        list(flow.parameters()) + list(embedder.parameters()),
-        lr=1e-3
+    list(flow.parameters()) +
+    list(context_encoder.parameters()),
+    lr=1e-3
     )
 
-    n_steps = 5000
-
-    for step, (A_src, A_tgt, xy_id) in enumerate(loader):
-
-        if step >= n_steps:
-            break
-
-        # manda tutto su device
-        A_src = A_src.to(device)
-        A_tgt = A_tgt.to(device)
-        xy_id = xy_id.to(device)
-
-        loss, loss_mmd, loss_id = train_step(
-            flow,
-            embedder,
-            opt,
-            A_src,
-            A_tgt,
-            xy_id,
-            lambda_id=0.1
-        )
+    Nsteps = 2000
+    
+    for step, batch in enumerate(loader):
+        loss, mmd, lid = train_step(flow, context_encoder, opt, batch)
 
         if step % 200 == 0:
-            print(
-                f"step {step:5d} | "
-                f"loss {loss:.4f} | "
-                f"MMD {loss_mmd:.4f} | "
-                f"ID {loss_id:.4f}"
-            )
+            print(f"{step:5d} | loss {loss:.4f} | MMD {mmd:.4f} | ID {lid:.4f}")
 
-    # validate the training
+        if step == Nsteps:
+            break
+
+
+    # validation
+    # Nominal simulation, e.g. "central pair" of alpha,beta
+    x0 = 5
+    y0 = 5
+    A_sim = sample_from_th2(
+        source_hists[(x0, y0)],
+        n_samples=50000
+    )
+
+    # observed environmental parameters (example within the training range)
+    a0 = 2
+    b0 = 1
+    context = torch.tensor(
+        [x0, y0, a0, b0],
+        dtype=torch.float32
+    ).repeat(len(A_sim), 1)
+
+    flow.eval()
+    context_encoder.eval()
+
     with torch.no_grad():
-        A_new = flow(A_src, embedder(xy_id))
+        cond = context_encoder(context)
+        A_corr = flow(A_sim, cond)
 
-    h_out = ROOT.TH2D("out", "out",
-                      100, -3, 5,
-                      100, -5, 5)
-    
-    A = A_new.cpu().numpy()
-    for x, y in A:
-        h_out.Fill(x, y)
-
-    c = ROOT.TCanvas("c","",600,600)
-    h_out.Draw("colz")
-    c.SaveAs("A_out.pdf")
-    
+    plot_dataset(A_corr,"A_corr")
