@@ -39,7 +39,7 @@ def test_sampling(hist,nevents=10000):
     A = sample_from_th2(hist, nevents)
     plt.scatter(A[:,0], A[:,1], s=1)
     plt.show()
-    
+
 class TH2FlowDataset(Dataset):
     def __init__(self, source_hists, target_hist, xy_to_id,
                  batch_size=32):
@@ -78,3 +78,7 @@ class TH2FlowDataset(Dataset):
 
         return A_src, A_tgt, xy_id
 
+    def get_full_source(self, xy):
+        hist = self.source_hists[xy]
+        N = int(hist.GetEntries())
+        return sample_from_th2(hist, N)
