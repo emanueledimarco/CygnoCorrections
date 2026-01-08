@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     toy_sim = "toy_simulation.root"
     print(f"Simulate the 'simulation' and store in the file {toy_sim}")
-    generate_toys(11,toy_sim,false)
+    generate_toys(11,toy_sim,False)
 
     toy_data = "toy_data.root"
     print(f"Simulate the 'data' and store in the file {toy_data}")
