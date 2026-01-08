@@ -179,7 +179,7 @@ if __name__ == "__main__":
     opt = torch.optim.Adam(
     list(flow.parameters()) +
     list(context_encoder.parameters()),
-    lr=1e-3
+    lr=1e-4
     )
 
     Nsteps = 2000
