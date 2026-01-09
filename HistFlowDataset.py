@@ -61,12 +61,12 @@ class TH2FlowDataset(Dataset):
         xy_id = self.xy_to_id[xy]
 
         # 2) campiona B eventi source e target
-        A_src = sample_from_th2(
+        A_sim = sample_from_th2(
             self.source_hists[xy],
             self.batch_size
         )
 
-        A_tgt = sample_from_th2(
+        A_data = sample_from_th2(
             self.target_hist,
             self.batch_size
         )
@@ -77,7 +77,7 @@ class TH2FlowDataset(Dataset):
             dtype=torch.long
         )
 
-        return A_src, A_tgt, xy_id
+        return A_sim, A_data, xy_id
 
     def get_full_source(self, xy):
         hist = self.source_hists[xy]
@@ -118,8 +118,8 @@ class TH2UnpairedTransportDataset(Dataset):
         h_tgt = self.target_hists[(x, y)]
 
         # 3) campiona eventi
-        A_src = sample_from_th2(h_src, self.batch_size)
-        A_tgt = sample_from_th2(h_tgt, self.batch_size)
+        A_sim = sample_from_th2(h_src, self.batch_size)
+        A_data = sample_from_th2(h_tgt, self.batch_size)
 
         # 4) contesto completo (alpha,beta,x,y)
         context = torch.tensor(
@@ -128,7 +128,7 @@ class TH2UnpairedTransportDataset(Dataset):
         ).repeat(self.batch_size, 1)
 
         return {
-            "A_src": A_src,       # [B,2]
-            "A_tgt": A_tgt,       # [B,2]
+            "A_sim": A_sim,       # [B,2]
+            "A_data": A_data,       # [B,2]
             "context": context    # [B,4]
         }
