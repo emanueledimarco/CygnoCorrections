@@ -1,0 +1,34 @@
+# This file holds the configurations train a normalizing flow by the main.py file
+# You can set multiple configurations and the main file will loop trough them and perform diferent trainings
+
+data_inputs:
+    x_ref      : 3
+    y_ref      : 3
+    a_ref      : 3
+    b_ref      : 3
+    N_x        : 11
+    N_y        : 11
+    N_a        : 5
+    N_b        : 5
+    sim_file   : toy_simulation.root
+    data_file  : toy_data.root
+    x_val      : 5
+    y_val      : 5
+    a_val      : 2
+    b_val      : 1
+
+configuration_2026_lime_v1:
+    encoder_input_dim    : 4
+    encoder_hidden_dim   : 64
+    encoder_output_dim   : 32
+    encoder_n_layers     : 2
+    encoder_dropout      : 0.1
+    flow_n_dim           : 2
+    flow_n_layers        : 6
+    flow_hidden_dim      : 128
+    flow_context_dim     : 32
+    initial_lr           : 1.0e-3
+    batch_size           : 32
+    sigma_mmd            : 1.0
+    lambda_id            : 1.0
+    
