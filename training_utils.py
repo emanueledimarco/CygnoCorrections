@@ -16,17 +16,15 @@ class ConditionalAffineCoupling(nn.Module):
             mask[::2] = 1  # alterna 1 e 0
         self.register_buffer("mask", mask)
 
-        in_dim = int(mask.sum()) + context_dim
-        out_dim = dim - int(mask.sum())
-
+        self.dim_masked = int(self.mask.sum().item())        # numero di feature mascherate
+        self.dim_unmasked = dim - self.dim_masked           # numero di feature da trasformare
+        
         self.st_net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
+            nn.Linear(context_dim + self.dim_masked, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * out_dim)
+            nn.Linear(hidden_dim, 2 * self.dim_unmasked)  # restituisce s e t concatenati
         )
-
+        
     def forward(self, x, context=None):
         # x: [batch, dim], context: [batch, dim_context]
         mask = self.mask  # [dim]
