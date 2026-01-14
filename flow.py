@@ -9,7 +9,7 @@ import yaml
 from yaml import Loader
 import json
 
-from HistFlowDataset import *
+from flow_datasets import *
 from FlowValidation import TH2FlowValidation
 from training_utils import SimulationCorrection, load_model
 
