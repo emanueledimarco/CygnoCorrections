@@ -4,18 +4,18 @@
 data_inputs:
     alpha_ref  : 0.0210
     lambda_ref : 1350
+    ztrue_ref  : 15.0
     P_ref      : 0.9070
     T_ref      : 20.5
-    N_alpha    : 11
-    N_lambda   : 11
-    N_P        : 5
-    N_T        : 5
+    Z_ref      : 15.0
     sim_map    : simulation_map.yaml
     data_map   : data_map.yaml
-    alpha_val  : 5
-    lambda_val : 5
-    P_val      : 2
-    T_val      : 1
+    alpha_val  : 0.0202
+    lambda_val : 1450
+    ztrue_val  : 25.0
+    P_val      : 0.9142
+    T_val      : 21.2
+    Z_val      : 25.0
 
 configuration_2026_lime_v1:
     encoder_hidden_dim   : 64

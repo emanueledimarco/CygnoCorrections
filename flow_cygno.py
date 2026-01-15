@@ -14,6 +14,7 @@ import json
 from flow_datasets import UnpairedTransportDataset, build_val_case
 from training_utils import SimulationCorrection, load_model
 from data_reading.read_data import read_reco_data_withselection
+from plot.plot_utils import plot_distributions
 
 def pair_grid(x,y,Ny):
     return x * Ny + y
@@ -87,9 +88,7 @@ if __name__ == "__main__":
     print("List of the veriables used in the flow as observables to transform:   ", variables)
     print("List of the veriables used in the flow for selection/validation:   ", spectators)
     
-    z = 15.0 # for the moment, one training for a test z. Next step is to make z another condition of the flow
-
-    print(f"Now filling the datasets for the simulation and data, for z={z}. It applies the selection and converts them to panda DFs.  Since many files are involved, it takes time...")
+    print(f"Now filling the datasets for the simulation and data. It applies the selection and converts them to panda DFs.  Since many files are involved, it takes time...")
 
     cachedir = "data/cache"
     if not args.usecache:
@@ -124,39 +123,42 @@ if __name__ == "__main__":
         source_data = pd.read_pickle(f"{cachedir}/source_data.pkl")
         target_data = pd.read_pickle(f"{cachedir}/target_data.pkl")
 
-    # prepare one "validation golden case" to define the convergence for the training
-    # with periodic validation and early stopping
-    # x=y=a=b=3 for example
-    alphaV  = float(dictionary["data_inputs"]["alpha_ref"])
-    lambdaV = float(dictionary["data_inputs"]["lambda_ref"])
-    PV      = float(dictionary["data_inputs"]["P_ref"])
-    TV      = float(dictionary["data_inputs"]["T_ref"])
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # remove the validation case from the training datasets and add it to a separate dic
-    print(f"Will use the case:\n\tz = {z};\n\t(alpha,lambda) = ({alphaV},{lambdaV});\n\t(P,T) = ({PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
-
-    source_key_V = (z,alphaV,lambdaV)
-    if source_key_V in source_data:
-        val_sim = source_data.pop(source_key_V,None)
-    else:
-        print(f"Warning, the element {source_key_V} is not among the simulation datasets")
-
-    target_key_V = (z,PV,TV)
-    if target_key_V in target_data:
-        val_data = target_data.pop(target_key_V,None)
-    else:
-        print(f"Warning, the element {target_key_V} is not among the data datasets")
-
-    dataset = UnpairedTransportDataset(
-        source_data,
-        target_data,
-        device=device
-    )
 
     # --- TRAINING ---- #
     if args.train: 
+
+        # prepare one "validation golden case" to define the convergence for the training
+        # with periodic validation and early stopping
+        # x=y=a=b=3 for example
+        alphaV  = float(dictionary["data_inputs"]["alpha_ref"])
+        lambdaV = float(dictionary["data_inputs"]["lambda_ref"])
+        ztrueV  = float(dictionary["data_inputs"]["ztrue_ref"])
+        PV      = float(dictionary["data_inputs"]["P_ref"])
+        TV      = float(dictionary["data_inputs"]["T_ref"])
+        ZV      = float(dictionary["data_inputs"]["Z_ref"])
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+     
+        # remove the validation case from the training datasets and add it to a separate dic
+        print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T) = ({ZV},{PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
+     
+        source_key_V = (ztrueV,alphaV,lambdaV)
+        if source_key_V in source_data:
+            val_sim = source_data.pop(source_key_V,None)
+        else:
+            print(f"Warning, the element {source_key_V} is not among the simulation datasets")
+     
+        target_key_V = (ZV,PV,TV)
+        if target_key_V in target_data:
+            val_data = target_data.pop(target_key_V,None)
+        else:
+            print(f"Warning, the element {target_key_V} is not among the data datasets")
+     
+        dataset = UnpairedTransportDataset(
+            source_data,
+            target_data,
+            device=device
+        )
 
         val_case = build_val_case(
             src_key=source_key_V,
@@ -213,38 +215,50 @@ if __name__ == "__main__":
         # seleziona uno xy di validazione
         # Nominal simulation, e.g. "central pair" of sim parameters x0,y0
         # observed environmental parameters (example within the training range) a0,b0
-        x0=dictionary["data_inputs"]["x_val"]
-        y0=dictionary["data_inputs"]["y_val"]
-        a0=dictionary["data_inputs"]["a_val"]
-        b0=dictionary["data_inputs"]["b_val"]
+        alpha0=dictionary["data_inputs"]["alpha_val"]
+        lambda0=dictionary["data_inputs"]["lambda_val"]
+        ztrue0=dictionary["data_inputs"]["ztrue_val"]
+        P0=dictionary["data_inputs"]["P_val"]
+        T0=dictionary["data_inputs"]["T_val"]
+        Z0=dictionary["data_inputs"]["Z_val"]
 
-        A_sim = sample_from_th2(source_hists[(x0,y0)],n_samples=50000)
-        A_data = sample_from_th2(target_hists[a0,b0],n_samples=50000)
-        
-        # seleziona un caso di context per il flow
-        context_values = [x0, y0, a0, b0]
-        context_tensor = torch.tensor([context_values]*len(A_sim), dtype=torch.float32)
-        cond = context_encoder(context_tensor)
+        src_key_0 = (ztrue0,alpha0,lambda0)
+        tgt_key_0 = (Z0,P0,T0)
+
+        # context construction
+        src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
+        tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
+        context = torch.cat([src_key_0_t,tgt_key_0_t]).unsqueeze(0)
+
+        # dataframe -> torch tensors conversion
+        A_sim_df  = source_data[src_key_0]
+        A_data_df = target_data[tgt_key_0]
+        A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
+        A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
+
+        cond = context_encoder(context)
 
         # --- APPLICA FLOW PER LA VALIDAZIONE --- #
         print ("EVALUATE FLOW")
-        A_corr = flow(A_sim.detach().clone(), cond)
+        # replica il context per ogni evento di A_sim
+        context_rep = context.repeat(A_sim.shape[0], 1)
+        with torch.no_grad():
+            cond = context_encoder(context_rep)
+            A_corr, _ = flow(A_sim, cond)
         print("FLOW done")
 
+        # A_corr torch → pandas with the same structure of A_sim (to plot)
+        A_corr_df = pd.DataFrame(
+            A_corr.detach().cpu().numpy(),
+            columns=A_sim_df.columns
+        )
+        
         # --- CREAZIONE VALIDATOR --- #
-        validator = TH2FlowValidation(A_sim=A_sim,
-                                      A_corr=A_corr,
-                                      A_data=A_data,
-                                      xmin=-3,xmax=7,
-                                      ymin=-5,ymax=5)
-
-        # --- PRODUZIONE PLOT MULTIPAGINA PDF --- #
-        pdf_name = "validation_multipage.pdf"
-        validator.plot_validation(pdf_name)
-        print(f"Validazione completata. File PDF generato: {pdf_name}")
+        path_to_plots = "./plot/validation_plots/"
+        plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df)
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
-        save_arrays_root("trained_tree_valid.root", A_sim, A_corr, A_data)
+        #save_arrays_root("trained_tree_valid.root", A_sim, A_corr, A_data)
         
         
     else:

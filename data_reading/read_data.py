@@ -67,12 +67,12 @@ def read_reco_data_withselection(variables, spectators, rootfiles, return_specta
     else:
         return data_df
 
-def validate_data_and_mc(variables, spectators, files_data, files_mc, DokinematicsRW=False):
+def validate_data_and_mc(variables, spectators, files_data, files_mc):
 
     data_df = read_reco_data_withselection(branches, files_data)
     mc_df = read_reco_data_withselection(branches, files_mc)
     
-    # now lets call a plotting function to perform the plots of the read distributions for validation porpuses
+    # now lets call a plotting function to per form the plots of the read distributions for validation porpuses
     path_to_plots = "./plot/validation_plots/"
 
     # now as a last step, we need to split the data into training, validation and test dataset

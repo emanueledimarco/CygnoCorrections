@@ -188,7 +188,7 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
 
     fig.savefig(output_filename)
 
-def plot_distributions( path, data_df, mc_df, variables_to_plot, mc_weights=None ):
+def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None ):
 
     # Ensure the output directory exists
     os.makedirs(path, exist_ok=True)
@@ -198,7 +198,9 @@ def plot_distributions( path, data_df, mc_df, variables_to_plot, mc_weights=None
         # Extract data for the variable
         data_values = data_df[variable].dropna().values
         mc_values = mc_df[variable].dropna().values
-
+        if corr_df is not None:
+            corr_values = corr_df[variable].dropna().values
+        
         # Compute mean and standard deviation for data histogram binning
         mean = np.mean(data_values)
         std = np.std(data_values)
@@ -217,19 +219,19 @@ def plot_distributions( path, data_df, mc_df, variables_to_plot, mc_weights=None
         bins = hist.axis.Variable(bin_edges)
         data_hist = hist.Hist(bins)
         mc_hist = hist.Hist(bins)
-        mc_rw_hist = hist.Hist(bins)
+        corr_hist = hist.Hist(bins)
 
         # Fill histograms
         data_hist.fill(data_values)
         mc_hist.fill(mc_values)
-        if mc_weights is not None:
-            mc_rw_hist.fill(mc_values, weight=mc_weights)
+        if corr_df is not None:
+            corr_hist.fill(corr_values)
         else:
-            mc_rw_hist.fill(mc_values)
+            corr_hist.fill(mc_values)
 
         # Plot and save the histograms
         output_path = os.path.join(path, f"{variable}.png")
-        plott(data_hist, mc_hist, mc_rw_hist, output_path, xlabel=variable)
+        plott(data_hist, mc_hist, corr_hist, output_path, xlabel=variable)
 
 def plot_distributions_for_tensors(
     data_tensor,
