@@ -16,73 +16,74 @@ class ConditionalAffineCoupling(nn.Module):
             mask[::2] = 1  # alterna 1 e 0
         self.register_buffer("mask", mask)
 
-        self.dim_masked = int(self.mask.sum().item())        # numero di feature mascherate
+        self.dim_masked = int(self.mask.sum().item())       # numero di feature mascherate
         self.dim_unmasked = dim - self.dim_masked           # numero di feature da trasformare
+
+        in_features = self.dim_masked + context_dim
+        out_features = 2 * self.dim_unmasked  # restituisce s e t concatenati
         
         self.st_net = nn.Sequential(
-            nn.Linear(context_dim + self.dim_masked, hidden_dim),
+            nn.Linear(in_features, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * self.dim_unmasked)  # restituisce s e t concatenati
+            nn.Linear(hidden_dim, out_features)  # restituisce s e t concatenati
         )
-        
-    def forward(self, x, context=None):
-        # x: [batch, dim], context: [batch, dim_context]
-        mask = self.mask  # [dim]
-        
-        # Maschera e parte passante
-        x_masked = x * mask           # feature mascherate → input di s,t
-        x_pass = x * (1 - mask)      # feature che verranno trasformate
+
+    def forward(self, x, context):
+        mask = self.mask
      
-        # Calcolo s e t solo sulle feature non mascherate
-        st_input = torch.cat([x_masked, context], dim=1) if context is not None else x_masked
-        st = self.st_net(st_input)  # [batch, 2 * dim_unmasked]
-        
-        # Separiamo s e t
-        dim_unmasked = int((1 - mask).sum().item())
-        s = st[:, :dim_unmasked]
-        t = st[:, dim_unmasked:]
+        # selezione corretta delle feature
+        x_masked = x[:, mask.bool()]           # (B, dim_masked): feature mascherate → input di s,t
+        x_unmasked = x[:, ~mask.bool()]        # (B, dim_unmasked): feature che verranno trasformate
      
-        # Applichiamo la trasformazione affine solo alle feature non mascherate
-        x_transformed = x_pass.clone()
-        if dim_unmasked > 0:
-            x_transformed[:, mask == 0] = x_pass[:, mask == 0] * torch.exp(s) + t
+        # rete s,t (solo sulle variabili non mascherate)
+        st_input = torch.cat([x_masked, context], dim=1)
+        st = self.st_net(st_input)
+        s, t = st.chunk(2, dim=1)
      
-        # Combiniamo con la parte mascherata
-        y = x_masked + x_transformed
+        # output (la trasformazione affine e' applicata solo alle feature non mascherate)
+        y = x.clone()
+        y[:, ~mask.bool()] = x_unmasked * torch.exp(s) + t
      
-        # Log-det Jacobiano
-        log_det = s.sum(dim=1) if dim_unmasked > 0 else torch.zeros(x.size(0), device=x.device)
-     
+        log_det = s.sum(dim=1)
         return y, log_det
 
-
-    def inverse(self, y, context=None):
-        mask = self.mask  # [dim]
+    def inverse(self, y, context):
+        mask = self.mask.bool()
      
-        # Separiamo le feature mascherate e non mascherate
-        y_masked = y * mask
-        y_pass = y * (1 - mask)
+        y_masked   = y[:, mask]        # stesse feature del forward
+        y_unmasked = y[:, ~mask]
      
-        # Calcolo s e t come nel forward
-        st_input = torch.cat([y_masked, context], dim=1) if context is not None else y_masked
+        st_input = torch.cat([y_masked, context], dim=1)
         st = self.st_net(st_input)
+        s, t = st.chunk(2, dim=1)
      
-        dim_unmasked = int((1 - mask).sum().item())
-        s = st[:, :dim_unmasked]
-        t = st[:, dim_unmasked:]
+        x = y.clone()
+        x[:, ~mask] = (y_unmasked - t) * torch.exp(-s)
      
-        # Inverse affine sulle feature non mascherate
-        x_pass = y_pass.clone()
-        if dim_unmasked > 0:
-            x_pass[:, mask == 0] = (y_pass[:, mask == 0] - t) * torch.exp(-s)
-     
-        # Combiniamo con la parte mascherata
-        x = y_masked + x_pass
-     
-        # Log-det Jacobiano (negativo di forward)
-        log_det = -s.sum(dim=1) if dim_unmasked > 0 else torch.zeros(y.size(0), device=y.device)
-     
+        log_det = -s.sum(dim=1)
         return x, log_det
+
+def sanity_check_coupling(flow, context_encoder, device="cpu"):
+    flow.eval()
+    context_encoder.eval()
+ 
+    with torch.no_grad():
+        # prendi un layer reale dal flow
+        layer = flow.layers[0]
+ 
+        D = flow.dim
+        context_dim = context_encoder.output_dim
+ 
+        x = torch.randn(10, D, device=device)
+        context = torch.randn(10, context_dim, device=device)
+ 
+        y, _ = layer(x, context)
+        x_rec, _ = layer.inverse(y, context)
+ 
+        max_err = (x - x_rec).abs().max().item()
+        print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
+ 
+        assert max_err < 1e-6, "Coupling layer is NOT invertible!"
 
 
 class ConditionalFlow(nn.Module):
@@ -133,6 +134,24 @@ class ConditionalFlow(nn.Module):
             "context_dim": self.context_dim,
         }
     
+def sanity_check_flow(flow, context_encoder, device="cpu"):
+    flow.eval()
+    context_encoder.eval()
+ 
+    with torch.no_grad():
+        x = torch.randn(10, flow.dim, device=device)
+        raw_context = torch.randn(10, context_encoder.input_dim, device=device)
+        context = context_encoder(raw_context)
+ 
+        z, ld1 = flow(x, context)
+        x_rec, ld2 = flow.inverse(z, context)
+ 
+        max_err = (x - x_rec).abs().max().item()
+        print(f"[FLOW CHECK] max reconstruction error = {max_err:.3e}")
+        print(f"[FLOW CHECK] log-det consistency = {(ld1 + ld2).abs().max().item():.3e}")
+ 
+        assert max_err < 1e-6
+        assert (ld1 + ld2).abs().max() < 1e-6
 
 class ContextEncoder(nn.Module):
     def __init__(
@@ -250,6 +269,9 @@ def train_step(
     flow.train()
     context_encoder.train()
     optimizer.zero_grad()
+
+
+    print("Start train_step")
     
     # N.B. Lo squeeze(0) serve per rimuovere la dimensione aggiuntiva al tensore aggiunta dal data-loader (come batch 1)
     A_sim_full  = batch["A_sim"].squeeze(0)
@@ -279,6 +301,8 @@ def train_step(
     # --- forward pass ---
     A_corr = flow(A_sim, cond)
 
+    print("A_corr done")
+    
     # --- losses ---
     loss_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd)
 
@@ -372,13 +396,16 @@ class SimulationCorrection():
         self.D = next(iter(self.dataset))["A_sim"].shape[1] # numero di variabili
 
         self.flow = ConditionalFlow(dim=self.D, n_layers=self.flow_n_layers, hidden_dim=self.flow_hidden_dim, context_dim=self.flow_context_dim).to(self.device)
-
+        
         self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
+        sanity_check_coupling(self.flow, self.context_encoder, device=self.device)
+        sanity_check_flow(self.flow, self.context_encoder, device=self.device)
 
         self.optimizer = torch.optim.Adam(list(self.flow.parameters()) + list(self.context_encoder.parameters()), lr=self.initial_lr)
 
     def set_validation_case(self, datasets_and_context):
         self.val_case = datasets_and_context
+
         
     def train_the_flow(self):
 
