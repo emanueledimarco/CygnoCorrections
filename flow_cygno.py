@@ -11,7 +11,7 @@ from yaml import Loader
 import json
 
 
-from flow_datasets import UnpairedTransportDataset
+from flow_datasets import UnpairedTransportDataset, build_val_case
 from training_utils import SimulationCorrection, load_model
 from data_reading.read_data import read_reco_data_withselection
 
@@ -133,12 +133,6 @@ if __name__ == "__main__":
     TV      = float(dictionary["data_inputs"]["T_ref"])
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    dataset = UnpairedTransportDataset(
-        source_data,
-        target_data,
-        device=device
-    )
 
     # remove the validation case from the training datasets and add it to a separate dic
     print(f"Will use the case:\n\tz = {z};\n\t(alpha,lambda) = ({alphaV},{lambdaV});\n\t(P,T) = ({PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
@@ -155,16 +149,23 @@ if __name__ == "__main__":
     else:
         print(f"Warning, the element {target_key_V} is not among the data datasets")
 
-    
+    dataset = UnpairedTransportDataset(
+        source_data,
+        target_data,
+        device=device
+    )
+
     # --- TRAINING ---- #
     if args.train: 
 
-        val_batch = {
-            "A_sim": val_sim,
-            "A_data": val_data,
-            "context": torch.tensor([[alphaV,lambdaV,PV,TV]],dtype=torch.float32)
-        }
-
+        val_case = build_val_case(
+            src_key=source_key_V,
+            tgt_key=target_key_V,
+            source_data=val_sim,
+            target_data=val_data,
+            device=device
+        )
+        
         # context configuration
         raw_context_dim = len(source_key_V) + len(target_key_V)
         encoder_input_dim  = raw_context_dim
@@ -190,7 +191,7 @@ if __name__ == "__main__":
                                            flow_n_layers, flow_hidden_dim, flow_context_dim,
                                            initial_lr, batch_size, sigma_mmd, lambda_id)
         corrections.setup_flow()
-        corrections.set_validation_case(val_batch)
+        corrections.set_validation_case(val_case)
         corrections.train_the_flow()
         
      

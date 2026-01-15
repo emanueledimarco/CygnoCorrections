@@ -222,30 +222,29 @@ def identity_loss(flow, A_src, context, weight=1.0):
     Penalizza deviazioni quando la trasformazione dovrebbe
     essere prossima all'identità.
     """
-    A_id = flow(A_src, context)
+    A_id, _ = flow(A_src, context)
     return weight * ((A_id - A_src) ** 2).mean()
 
-def subsample(A, n):
+def subsample(A, n, device="cpu"):
     N = A.shape[0]
     if N >= n:
-        idx = torch.randperm(N, device=A.device)[:n]
+        idx = torch.randperm(N, device=device)[:n]
     else:
-        idx = torch.randint(0, N, (n,), device=A.device)
+        idx = torch.randint(0, N, (n,), device=device)
     return A[idx]
 
-def subsample_dynamic(A, n_max):
+def subsample_dynamic(A, n_max, device="cpu"):
     """
     A: torch.Tensor (N, D)
     n_max: numero massimo di eventi desiderato
     """
     N = A.shape[0]
-    
     # Se abbiamo più eventi di n_max → campiona senza replacement
     if N >= n_max:
-        idx = torch.randperm(N, device=A.device)[:n_max]
+        idx = torch.randperm(N, device=device)[:n_max]
     # Altrimenti usa tutti gli eventi
     else:
-        idx = torch.arange(N, device=A.device)
+        idx = torch.arange(N, device=device)
     
     return A[idx]
 
@@ -270,39 +269,27 @@ def train_step(
     context_encoder.train()
     optimizer.zero_grad()
 
-
-    print("Start train_step")
-    
     # N.B. Lo squeeze(0) serve per rimuovere la dimensione aggiuntiva al tensore aggiunta dal data-loader (come batch 1)
     A_sim_full  = batch["A_sim"].squeeze(0)
     A_data_full = batch["A_data"].squeeze(0)
 
     # subsampling dei dataset in batch di n_events ciascuno
-    A_sim  = subsample_dynamic(A_sim_full, n_events)
-    A_data = subsample_dynamic(A_data_full, n_events)
+    A_sim  = subsample_dynamic(A_sim_full, n_events, device=A_sim_full.device)
+    A_data = subsample_dynamic(A_data_full, n_events, device=A_sim_full.device)
 
     # --- Costruzione del contesto ---
     sim_key = batch["sim_key"].squeeze(0)
     data_key = batch["data_key"].squeeze(0)
-    print("sim key = ",sim_key)
 
     context_vals = list(sim_key) + list(data_key)   # lista di float
-    print("cont vals =",context_vals)
     context_vals = torch.tensor(context_vals, dtype=torch.float32, device=A_sim.device)
 
     context = context_vals.unsqueeze(0).repeat(len(A_sim), 1)
     cond = context_encoder(context)
 
-    print("src_key.shape:", sim_key.shape)
-    print("tgt_key.shape:", sim_key.shape)
-    print("context.shape:", context.shape)
-    #print("x.shape:", x.shape)
-    
     # --- forward pass ---
-    A_corr = flow(A_sim, cond)
+    A_corr, _ = flow(A_sim, cond)
 
-    print("A_corr done")
-    
     # --- losses ---
     loss_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd)
 
@@ -327,18 +314,17 @@ def compute_val_mmd(flow, context_encoder, val_case, n_events, sigma_mmd=1.0):
     # Subsampling uniforme sulla distribuzione di validazione
     A_sim  = subsample_dynamic(val_case["A_sim"],  n_events)
     A_data = subsample_dynamic(val_case["A_data"], n_events)
-                
-    # Costruzione contesto
-    context_vals = list(val_case["sim_key"]) + list(val_case["data_key"])
-    context = torch.tensor([context_vals]*len(A_sim), dtype=torch.float32, device=A_sim.device)
 
-    # Forward
+    context = val_case["context"].repeat(len(A_sim), 1)
+
+    # --- inference senza grad ---
     with torch.no_grad():
-        A_corr = flow(A_sim, cond)
-    val_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd).item()
+        cond = context_encoder(context)
+        A_corr, _ = flow(A_sim, cond)
 
-    return val_mmd 
-
+    # --- loss --- 
+    loss = mmd_loss(A_corr, A_data)
+    return loss
 
 class SimulationCorrection():
 
