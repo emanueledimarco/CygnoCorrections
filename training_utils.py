@@ -28,7 +28,7 @@ class ConditionalAffineCoupling(nn.Module):
             nn.Linear(hidden_dim, out_features)  # restituisce s e t concatenati
         )
 
-    def forward(self, x, context):
+    def forward(self, x, context, s_max=5):
         mask = self.mask
      
         # selezione corretta delle feature
@@ -39,7 +39,8 @@ class ConditionalAffineCoupling(nn.Module):
         st_input = torch.cat([x_masked, context], dim=1)
         st = self.st_net(st_input)
         s, t = st.chunk(2, dim=1)
-     
+        s = torch.tanh(s) * s_max   # s_max ~ 5 => to avoid large exp(s) at the beginning of the training
+        
         # output (la trasformazione affine e' applicata solo alle feature non mascherate)
         y = x.clone()
         y[:, ~mask.bool()] = x_unmasked * torch.exp(s) + t
@@ -47,7 +48,7 @@ class ConditionalAffineCoupling(nn.Module):
         log_det = s.sum(dim=1)
         return y, log_det
 
-    def inverse(self, y, context):
+    def inverse(self, y, context, s_max=5):
         mask = self.mask.bool()
      
         y_masked   = y[:, mask]        # stesse feature del forward
@@ -56,6 +57,7 @@ class ConditionalAffineCoupling(nn.Module):
         st_input = torch.cat([y_masked, context], dim=1)
         st = self.st_net(st_input)
         s, t = st.chunk(2, dim=1)
+        s = torch.tanh(s) * s_max   # s_max ~ 5 => to avoid large exp(s) at the beginning of the training
      
         x = y.clone()
         x[:, ~mask] = (y_unmasked - t) * torch.exp(-s)
@@ -92,7 +94,8 @@ class ConditionalFlow(nn.Module):
         self.dim = dim
         self.hidden_dim = hidden_dim
         self.context_dim = context_dim
-
+        self.n_layers = n_layers
+        
         layers = []
         for i in range(n_layers):
             mask = self._alternating_mask(dim, i)
@@ -211,7 +214,11 @@ def gaussian_kernel(x, y, sigma):
     return torch.exp(-dist2 / (2 * sigma ** 2))
 
 
-def mmd_loss(x, y, sigma=1.0):
+def mmd_loss(x, y, sigma=1.0, sigma_datadriven=True):
+    if sigma_datadriven:
+        with torch.no_grad():
+            pairwise = torch.cdist(x, y)
+            sigma = torch.median(pairwise)
     Kxx = gaussian_kernel(x, x, sigma).mean()
     Kyy = gaussian_kernel(y, y, sigma).mean()
     Kxy = gaussian_kernel(x, y, sigma).mean()
@@ -291,8 +298,21 @@ def train_step(
     A_corr, _ = flow(A_sim, cond)
 
     # --- losses ---
-    loss_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd)
+    if A_sim.shape[0] < 2 or A_data.shape[0] < 2: # check if there are enough events in the subsamples (with N=0 or 1 cannot define a distance)
+        return {
+            "loss": torch.tensor(0.0, device=A_sim.device),
+            "loss_mmd": torch.tensor(0.0, device=A_sim.device),
+            "loss_id":  torch.tensor(0.0, device=A_sim.device),
+            "skip": True
+        }
+    loss_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd, sigma_datadriven=True)
 
+    if torch.isnan(loss_mmd):
+        print("NaN detected")
+        print("A_src:", A_sim.min(), A_sim.max())
+        print("A_corr:", A_corr.min(), A_corr.max())
+        print("sigma:", sigma_mmd)
+    
     # identity: contesto nullo → trasformazione ~ identità
     zero_context = torch.zeros_like(cond)
     loss_id = identity_loss(flow, A_sim, zero_context)
@@ -307,6 +327,7 @@ def train_step(
         "loss": loss.item(),
         "loss_mmd": loss_mmd.item(),
         "loss_id": loss_id.item(),
+        "skip": False
     }
 
 def compute_val_mmd(flow, context_encoder, val_case, n_events, sigma_mmd=1.0):
@@ -420,7 +441,8 @@ class SimulationCorrection():
         for step, batch in enumerate(loader):
 
             losses = train_step(self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd)
-         
+            if losses.get("skip", False):
+                continue
             if step % 100 == 0:
                 print(
                     f"step {step:5d} | "
