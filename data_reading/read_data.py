@@ -108,6 +108,14 @@ class TreeFlowDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.A_sim[idx], self.A_data[idx], self.context[idx]
 
+def df_to_tree(root_file, tree_name, df):
+    root_file.mktree(tree_name,
+                     {
+                         col: df[col].to_numpy(dtype=np.float32)
+                         for col in df.columns
+                     }
+                     )
+
 
 if __name__ == "__main__":
 
