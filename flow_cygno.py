@@ -4,6 +4,7 @@ import torch.nn as nn
 import ROOT
 import argparse
 import os
+import uproot
 import pandas as pd
 
 import yaml
@@ -12,59 +13,9 @@ import json
 
 
 from flow_datasets import UnpairedTransportDataset, build_val_case
-from training_utils import SimulationCorrection, load_model
-from data_reading.read_data import read_reco_data_withselection
+from training_utils import SimulationCorrection, load_model, atomic_flow_test
+from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
-
-def pair_grid(x,y,Ny):
-    return x * Ny + y
-
-def plot_dataset(DS,pname="A_out"):
-
-    h_out = ROOT.TH2D("out", "out",
-                      100, -3, 7,
-                      100, -5, 5)
-    
-    A = DS.cpu().numpy()
-    for x, y in A:
-        h_out.Fill(x, y)
-
-    c = ROOT.TCanvas("c","",600,600)
-    h_out.Draw("colz")
-    c.SaveAs(f"{pname}.pdf")
-
-
-
-def save_arrays_root(fname, A_sim, A_corr, A_data):
-    f = ROOT.TFile(fname, "RECREATE")
-    t = ROOT.TTree("events", "Flow validation")
-
-    import array
-    xs = array.array('f', [0])
-    ys = array.array('f', [0])
-    xc = array.array('f', [0])
-    yc = array.array('f', [0])
-    xd = array.array('f', [0])
-    yd = array.array('f', [0])
-
-    t.Branch("sim_x", xs, "sim_x/F")
-    t.Branch("sim_y", ys, "sim_y/F")
-    t.Branch("corr_x", xc, "corr_x/F")
-    t.Branch("corr_y", yc, "corr_y/F")
-    t.Branch("data_x", xd, "data_x/F")
-    t.Branch("data_y", yd, "data_y/F")
-
-    for i in range(len(A_sim)):
-        xs[0], ys[0] = A_sim[i]
-        xc[0], yc[0] = A_corr[i]
-        if i < len(A_data):
-            xd[0], yd[0] = A_data[i]
-        t.Fill()
-
-    t.Write()
-    f.Close()
-
-
 
 
 if __name__ == "__main__":
@@ -74,6 +25,7 @@ if __name__ == "__main__":
     parser.add_argument("--validate",action="store_true",help="Run the validation step")
     parser.add_argument("--configuration",type=str,default="configuration_2026_lime_v1",help="Key of the configuration in the flow yaml configuration file")
     parser.add_argument("--usecache",action="store_true",help="use cached source and target datasets in cache/ dir instead of re-reading from ROOT")
+    parser.add_argument("--atomictest",action="store_true",help="Do basic identity test on the training (DEBUG)")
     args = parser.parse_args()
 
     #loop to read over network condigurations from the yaml file: - one way to do hyperparameter optimization
@@ -194,7 +146,15 @@ if __name__ == "__main__":
                                            initial_lr, batch_size, sigma_mmd, lambda_id)
         corrections.setup_flow()
         corrections.set_validation_case(val_case)
-        corrections.train_the_flow()
+        corrections.train_the_flow(test_identity=args.atomictest)
+
+        if args.atomictest:
+            atomic_flow_test(
+                corrections.flow,
+                dim_x=corrections.flow.dim,
+                dim_c=corrections.context_encoder.output_dim,
+                device=device
+        )
         
      
         
@@ -224,7 +184,7 @@ if __name__ == "__main__":
 
         src_key_0 = (ztrue0,alpha0,lambda0)
         tgt_key_0 = (Z0,P0,T0)
-
+        
         # context construction
         src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
         tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
@@ -258,8 +218,13 @@ if __name__ == "__main__":
         plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df)
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
-        #save_arrays_root("trained_tree_valid.root", A_sim, A_corr, A_data)
-        
+        output_root = "validation_output.root"
+        with uproot.recreate(f"{path_to_plots}/{output_root}") as f:
+            df_to_tree(f, "Sim",  A_sim_df)
+            df_to_tree(f, "Data", A_data_df)
+            df_to_tree(f, "Corr", A_corr_df)
+
+        print(f"ROOT validation file written to: {path_to_plots}/{output_root}")
         
     else:
         print("Specify at least --train or --validate")
