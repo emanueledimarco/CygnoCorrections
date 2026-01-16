@@ -7,63 +7,100 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 class ConditionalAffineCoupling(nn.Module):
-    def __init__(self, dim, context_dim, hidden_dim=128, mask=None):
+    def __init__(self, dim, context_dim=0, mask=None, hidden_dim=128):
+        """
+        dim         : numero totale di feature x
+        context_dim : dimensione del contesto condizionale
+        mask        : tensor (dim,), 1 = mascherata (invariate), 0 = da trasformare
+        hidden_dim  : dimensione della rete interna s,t
+        """
         super().__init__()
         self.dim = dim
+        self.context_dim = context_dim
 
         if mask is None:
             mask = torch.zeros(dim)
             mask[::2] = 1  # alterna 1 e 0
         self.register_buffer("mask", mask)
 
-        self.dim_masked = int(self.mask.sum().item())       # numero di feature mascherate
-        self.dim_unmasked = dim - self.dim_masked           # numero di feature da trasformare
+        self.dim_masked = int(mask.sum().item())
+        self.dim_unmasked = dim - self.dim_masked
 
-        in_features = self.dim_masked + context_dim
-        out_features = 2 * self.dim_unmasked  # restituisce s e t concatenati
-        
+        # rete affine s,t
+        input_dim = self.dim_masked + context_dim
         self.st_net = nn.Sequential(
-            nn.Linear(in_features, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, out_features)  # restituisce s e t concatenati
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2 * self.dim_unmasked)
         )
 
-    def forward(self, x, context, s_max=5):
-        mask = self.mask
-     
-        # selezione corretta delle feature
-        x_masked = x[:, mask.bool()]           # (B, dim_masked): feature mascherate → input di s,t
-        x_unmasked = x[:, ~mask.bool()]        # (B, dim_unmasked): feature che verranno trasformate
-     
-        # rete s,t (solo sulle variabili non mascherate)
-        st_input = torch.cat([x_masked, context], dim=1)
-        st = self.st_net(st_input)
-        s, t = st.chunk(2, dim=1)
-        s = torch.tanh(s) * s_max   # s_max ~ 5 => to avoid large exp(s) at the beginning of the training
-        
-        # output (la trasformazione affine e' applicata solo alle feature non mascherate)
-        y = x.clone()
-        y[:, ~mask.bool()] = x_unmasked * torch.exp(s) + t
-     
-        log_det = s.sum(dim=1)
+    def forward(self, x, context=None):
+        """
+        x: (B, dim) o (B, N, dim)
+        context: (B, context_dim) o (B*N, context_dim)
+        """
+        orig_shape = x.shape
+        x_flat = x.view(-1, x.shape[-1])  # appiattisce batch ed eventuali dimensioni extra
+
+        mask = self.mask.to(x.device)
+        x_masked = x_flat[:, mask.bool()]
+
+        # concatena context
+        # context: (C,) o (1, C)
+        if context is not None:
+            if context.dim() == 1:
+                # da (C,) a (N_events, C)
+                context_flat = context.unsqueeze(0).expand(x_masked.shape[0], -1)
+            else:
+                # già (1, C)
+                context_flat = context.expand(x_masked.shape[0], -1)
+            net_input = torch.cat([x_masked, context_flat], dim=1)
+        else:
+            net_input = x_masked
+
+        # calcola scale e shift
+        s, t = self.st_net(net_input).chunk(2, dim=1)
+        s = torch.tanh(s)  # stabilizza numericamente
+
+        # applica affine solo alle feature non mascherate
+        y_flat = x_flat.clone()
+        y_flat[:, (~mask.bool())] = x_flat[:, (~mask.bool())] * torch.exp(s) + t
+
+        # rimetti la forma originale
+        y = y_flat.view(*orig_shape)
+        log_det = s.sum(dim=1)  # shape (B*N,) se batch flatten, puoi rimodellare se vuoi
+
         return y, log_det
 
-    def inverse(self, y, context, s_max=5):
-        mask = self.mask.bool()
-     
-        y_masked   = y[:, mask]        # stesse feature del forward
-        y_unmasked = y[:, ~mask]
-     
-        st_input = torch.cat([y_masked, context], dim=1)
-        st = self.st_net(st_input)
-        s, t = st.chunk(2, dim=1)
-        s = torch.tanh(s) * s_max   # s_max ~ 5 => to avoid large exp(s) at the beginning of the training
-     
-        x = y.clone()
-        x[:, ~mask] = (y_unmasked - t) * torch.exp(-s)
-     
+    def inverse(self, y, context=None):
+        """
+        y: (B, dim) o (B, N, dim)
+        context: (B, context_dim) o (B*N, context_dim)
+        """
+        orig_shape = y.shape
+        y_flat = y.view(-1, y.shape[-1])
+
+        mask = self.mask.to(y.device)
+        y_masked = y_flat[:, mask.bool()]
+
+        if context is not None:
+            context_flat = context.view(y_masked.shape[0], -1)
+            net_input = torch.cat([y_masked, context_flat], dim=1)
+        else:
+            net_input = y_masked
+
+        s, t = self.st_net(net_input).chunk(2, dim=1)
+        s = torch.tanh(s)
+
+        x_flat = y_flat.clone()
+        x_flat[:, (~mask.bool())] = (y_flat[:, (~mask.bool())] - t) * torch.exp(-s)
+
+        x = x_flat.view(*orig_shape)
         log_det = -s.sum(dim=1)
-        return x, log_det
+
+        return x    
 
 def sanity_check_coupling(flow, context_encoder, device="cpu"):
     flow.eval()
@@ -80,54 +117,64 @@ def sanity_check_coupling(flow, context_encoder, device="cpu"):
         context = torch.randn(10, context_dim, device=device)
  
         y, _ = layer(x, context)
-        x_rec, _ = layer.inverse(y, context)
+        x_rec = layer.inverse(y, context)
  
         max_err = (x - x_rec).abs().max().item()
         print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
  
         assert max_err < 1e-6, "Coupling layer is NOT invertible!"
 
-
 class ConditionalFlow(nn.Module):
-    def __init__(self, dim, context_dim, n_layers=6, hidden_dim=128):
+    def __init__(self, dim, n_layers, hidden_dim, masks, context_dim=0):
+        """
+        dim        : dimensione delle feature da trasformare
+        n_layers   : numero di coupling layers
+        hidden_dim : dimensione hidden network di ciascun coupling
+        masks      : lista di mask tensor (uno per layer)
+        context_dim: dimensione del context condizionale
+        """
         super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
-        self.context_dim = context_dim
-        self.n_layers = n_layers
-        
-        layers = []
-        for i in range(n_layers):
-            mask = self._alternating_mask(dim, i)
-            layers.append(
-                ConditionalAffineCoupling(
-                    dim=dim,
-                    context_dim=context_dim,
-                    hidden_dim=hidden_dim,
-                    mask=mask
-                )
+        assert len(masks) == n_layers, "Serve una mask per ogni layer"
+        self.dim=dim
+        self.n_layers=n_layers
+        self.hidden_dim=hidden_dim
+        self.context_dim=context_dim
+        self.layers = nn.ModuleList([
+            ConditionalAffineCoupling(
+                dim=dim,
+                context_dim=context_dim,
+                mask=masks[i],
+                hidden_dim=hidden_dim
             )
-        self.layers = nn.ModuleList(layers)
+            for i in range(n_layers)
+        ])
+        self.dim = dim  # utile per sanity check
 
-    def _alternating_mask(self, dim, i):
-        mask = torch.zeros(dim)
-        mask[i % 2::2] = 1
-        return mask
-
-    def forward(self, x, context):
-        log_det = 0
+    def forward(self, x, context=None):
+        """
+        Applica il flow ai dati x con context condizionale
+        x: (B, dim) o (B, N, dim)
+        context: (B, context_dim) o (B*N, context_dim)
+        Ritorna: y, log_det totale
+        """
+        log_det_total = 0
+        y = x
         for layer in self.layers:
-            x, ld = layer(x, context)
-            log_det += ld
-        return x, log_det
+            y, log_det = layer(y, context)
+            log_det_total += log_det
+        return y, log_det_total
 
-    def inverse(self, z, context):
-        log_det = 0
+    def inverse(self, z, context=None):
+        """
+        Inverte il flow
+        z: (B, dim) o (B, N, dim)
+        context: stesso context usato nel forward
+        """
+        x = z
         for layer in reversed(self.layers):
-            z, ld = layer.inverse(z, context)
-            log_det += ld
-        return z, log_det
-    
+            x = layer.inverse(x, context)
+        return x
+
     # Chiave per checkpoint
     def get_config(self):
         return {
@@ -136,7 +183,7 @@ class ConditionalFlow(nn.Module):
             "hidden_dim": self.hidden_dim,
             "context_dim": self.context_dim,
         }
-    
+
 def sanity_check_flow(flow, context_encoder, device="cpu"):
     flow.eval()
     context_encoder.eval()
@@ -146,15 +193,13 @@ def sanity_check_flow(flow, context_encoder, device="cpu"):
         raw_context = torch.randn(10, context_encoder.input_dim, device=device)
         context = context_encoder(raw_context)
  
-        z, ld1 = flow(x, context)
-        x_rec, ld2 = flow.inverse(z, context)
+        z, _ = flow(x, context)
+        x_rec = flow.inverse(z, context)
  
         max_err = (x - x_rec).abs().max().item()
         print(f"[FLOW CHECK] max reconstruction error = {max_err:.3e}")
-        print(f"[FLOW CHECK] log-det consistency = {(ld1 + ld2).abs().max().item():.3e}")
  
         assert max_err < 1e-6
-        assert (ld1 + ld2).abs().max() < 1e-6
 
 class ContextEncoder(nn.Module):
     def __init__(
@@ -216,9 +261,8 @@ def gaussian_kernel(x, y, sigma):
 
 def mmd_loss(x, y, sigma=1.0, sigma_datadriven=True):
     if sigma_datadriven:
-        with torch.no_grad():
-            pairwise = torch.cdist(x, y)
-            sigma = torch.median(pairwise)
+        pairwise = torch.cdist(x.detach(), y.detach())
+        sigma = torch.median(pairwise)
     Kxx = gaussian_kernel(x, x, sigma).mean()
     Kyy = gaussian_kernel(y, y, sigma).mean()
     Kxy = gaussian_kernel(x, y, sigma).mean()
@@ -242,19 +286,29 @@ def subsample(A, n, device="cpu"):
 
 def subsample_dynamic(A, n_max, device="cpu"):
     """
-    A: torch.Tensor (N, D)
+    A: torch.Tensor (B, N, D) oppure (N, D)
     n_max: numero massimo di eventi desiderato
     """
-    N = A.shape[0]
-    # Se abbiamo più eventi di n_max → campiona senza replacement
-    if N >= n_max:
-        idx = torch.randperm(N, device=device)[:n_max]
-    # Altrimenti usa tutti gli eventi
-    else:
-        idx = torch.arange(N, device=device)
-    
-    return A[idx]
+    if A.ndim == 2:  # (N, D)
+        N = A.shape[0]
+        if N >= n_max:
+            idx = torch.randperm(N, device=device)[:n_max]
+        else:
+            idx = torch.arange(N, device=device)
+        return A[idx]
 
+    elif A.ndim == 3:  # (B, N, D)
+        B, N, D = A.shape
+        if N >= n_max:
+            idx = torch.randperm(N, device=device)[:n_max]
+        else:
+            idx = torch.arange(N, device=device)
+        # sottocampiona lungo la dimensione 1 (eventi)
+        return A[:, idx, :]
+    
+    else:
+        raise ValueError(f"Unsupported tensor shape: {A.shape}")
+    
 def train_step(
     flow,
     context_encoder,
@@ -263,70 +317,81 @@ def train_step(
     n_events=50,
     lambda_id=0.1,
     sigma_mmd=1.0,
+    test_identity=False,
+    device="cpu"
 ):
     """
-    batch: dict contenente
-        'A_sim': Tensor(N_s, D)
-        'A_data': Tensor(N_t, D)
-        'sim_key': tuple (alpha,beta)
-        'data_key': tuple (x,y)
+    Step di training / identity test per un batch.
+    flow: ConditionalFlow
+    context_encoder: ContextEncoder
+    optimizer: torch optimizer
+    batch: dict con 'sim_key', 'data_key', 'A_sim', 'A_data'
+    n_events: numero di eventi da sottocampionare
+    lambda_id: peso ID loss
+    sigma_mmd: parametro del kernel MMD
+    test_identity: se True usa A_src = A_data
+    device: torch device
     """
 
     flow.train()
     context_encoder.train()
     optimizer.zero_grad()
 
-    # N.B. Lo squeeze(0) serve per rimuovere la dimensione aggiuntiva al tensore aggiunta dal data-loader (come batch 1)
-    A_sim_full  = batch["A_sim"].squeeze(0)
-    A_data_full = batch["A_data"].squeeze(0)
+    # --- selezione dati ---
+    A_sim_full = batch["A_sim"].to(device)
+    A_data_full = batch["A_data"].to(device)
 
     # subsampling dei dataset in batch di n_events ciascuno
-    A_sim  = subsample_dynamic(A_sim_full, n_events, device=A_sim_full.device)
-    A_data = subsample_dynamic(A_data_full, n_events, device=A_sim_full.device)
+    N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0])
+    A_sim_sub  = subsample_dynamic(A_sim_full, N, device=A_sim_full.device)
+    A_data_sub = subsample_dynamic(A_data_full, N, device=A_data_full.device)
+
+    if A_sim_sub.shape[1] == 0:
+        # fallback: copia tutti gli eventi disponibili
+        A_sim_sub = A_sim_full.clone()
+    if A_data_sub.shape[1] == 0:
+        A_data_sub = A_data_full.clone()
 
     # --- Costruzione del contesto ---
-    sim_key = batch["sim_key"].squeeze(0)
-    data_key = batch["data_key"].squeeze(0)
-
-    context_vals = list(sim_key) + list(data_key)   # lista di float
-    context_vals = torch.tensor(context_vals, dtype=torch.float32, device=A_sim.device)
-
-    context = context_vals.unsqueeze(0).repeat(len(A_sim), 1)
+    context = build_context_batch(batch, test_identity=test_identity, device=device)
     cond = context_encoder(context)
 
     # --- forward pass ---
-    A_corr, _ = flow(A_sim, cond)
+    A_corr, _ = flow(A_sim_sub, cond)
 
-    # --- losses ---
-    if A_sim.shape[0] < 2 or A_data.shape[0] < 2: # check if there are enough events in the subsamples (with N=0 or 1 cannot define a distance)
-        return {
-            "loss": torch.tensor(0.0, device=A_sim.device),
-            "loss_mmd": torch.tensor(0.0, device=A_sim.device),
-            "loss_id":  torch.tensor(0.0, device=A_sim.device),
-            "skip": True
-        }
-    loss_mmd = mmd_loss(A_corr, A_data, sigma=sigma_mmd, sigma_datadriven=True)
+    # --- calcolo loss ---
+    if test_identity:
+        # Identity loss
+        id_loss = torch.mean((A_corr - A_sim_sub)**2)
+        loss_mmd = torch.tensor(0.0, device=device)
+    else:
+        if A_sim_sub.shape[1] == 0 or A_data_sub.shape[1] == 0:
+            # salta questo batch
+            return {
+                "loss": None,
+                "loss_mmd": None,
+                "loss_id": None,
+                "skip": True
+            }
+        # MMD loss solo se non identity test
+        if A_data_sub.shape[1] == 0:
+            id_loss = torch.tensor(0.0, device=A_corr.device)
+            loss_mmd = torch.tensor(0.0, device=device)
+        else:
+            id_loss = torch.tensor(0.0, device=A_corr.device)
+            loss_mmd = mmd_loss(A_corr, A_data_sub, sigma=sigma_mmd, sigma_datadriven=True)
 
-    if torch.isnan(loss_mmd):
-        print("NaN detected")
-        print("A_src:", A_sim.min(), A_sim.max())
-        print("A_corr:", A_corr.min(), A_corr.max())
-        print("sigma:", sigma_mmd)
+    total_loss = lambda_id * id_loss + loss_mmd
     
-    # identity: contesto nullo → trasformazione ~ identità
-    zero_context = torch.zeros_like(cond)
-    loss_id = identity_loss(flow, A_sim, zero_context)
-
-    loss = loss_mmd + lambda_id * loss_id
-
-    # --- backward propagation ---
-    loss.backward()
+    # --- backward ---
+    optimizer.zero_grad()
+    total_loss.backward()
     optimizer.step()
-
+    
     return {
-        "loss": loss.item(),
+        "loss": total_loss.item(),
         "loss_mmd": loss_mmd.item(),
-        "loss_id": loss_id.item(),
+        "loss_id": id_loss.item(),
         "skip": False
     }
 
@@ -402,7 +467,13 @@ class SimulationCorrection():
 
         self.D = next(iter(self.dataset))["A_sim"].shape[1] # numero di variabili
 
-        self.flow = ConditionalFlow(dim=self.D, n_layers=self.flow_n_layers, hidden_dim=self.flow_hidden_dim, context_dim=self.flow_context_dim).to(self.device)
+        masks = generate_alternating_masks(self.D, self.flow_n_layers)
+
+        self.flow = ConditionalFlow(dim=self.D,
+                                    n_layers=self.flow_n_layers,
+                                    hidden_dim=self.flow_hidden_dim,
+                                    masks=masks,
+                                    context_dim=self.flow_context_dim).to(self.device)
         
         self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
         sanity_check_coupling(self.flow, self.context_encoder, device=self.device)
@@ -414,7 +485,7 @@ class SimulationCorrection():
         self.val_case = datasets_and_context
 
         
-    def train_the_flow(self):
+    def train_the_flow(self, test_identity=False):
 
         loader = DataLoader(self.dataset, batch_size=1, shuffle=True)
 
@@ -440,7 +511,7 @@ class SimulationCorrection():
         
         for step, batch in enumerate(loader):
 
-            losses = train_step(self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd)
+            losses = train_step(self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
             if losses.get("skip", False):
                 continue
             if step % 100 == 0:
@@ -545,3 +616,65 @@ def load_model(
     }
 
     return flow, context_encoder, metadata
+
+# this is to check that the flow is correctly closing (DEBUG, do just once)
+def atomic_flow_test(flow, dim_x, dim_c, device="cpu"):
+    flow.eval()
+
+    with torch.no_grad():
+        x = torch.randn(1000, dim_x, device=device)
+
+        # contesto FISSO e controllato
+        c = torch.zeros(1000, dim_c, device=device)
+
+        y, log_det = flow(x, c)
+        x_rec = flow.inverse(y, c)
+
+        max_err = torch.max(torch.abs(x - x_rec))
+        print(f"[ATOMIC TEST] max |x - inverse(forward(x))| = {max_err:.3e}")
+
+        assert max_err < 1e-5, "Atomic test FAILED"
+
+def build_context_batch(batch, test_identity=False, device='cpu'):
+    """
+    Costruisce il tensore context batch robustamente.
+    
+    batch: dict con chiavi 'sim_key' e 'data_key'
+    test_identity: se True, prende sim_key come source e target
+    device: 'cpu' o 'cuda'
+    
+    Ritorna: context di shape (n_events, n_context_features)
+    """
+    # Scegli le chiavi
+    key_src = batch["data_key"] if not test_identity else batch["sim_key"]
+    key_tgt = batch["data_key"] if not test_identity else batch["sim_key"]
+
+    # Se è un tensore scalare o ha più dimensioni, riducilo a 1D
+    key_src = key_src.flatten()
+    key_tgt = key_tgt.flatten()
+
+    # Concateniamo le feature di contesto
+    context = torch.cat([key_src, key_tgt], dim=0)  # (n_features,)
+
+    # Trasformiamo in batch ripetendo per ogni evento
+    n_events = batch["A_sim"].shape[0]
+    context = context.unsqueeze(0).expand(n_events, -1)  # (n_events, n_features)
+
+    return context.to(device)
+
+import torch
+
+def generate_alternating_masks(dim, n_layers):
+    """
+    Crea una lista di mask per ConditionalAffineCoupling
+    dim      : numero di feature del tuo flow
+    n_layers : numero di coupling layers
+    Ritorna  : lista di torch.Tensor di shape (dim,)
+    """
+    masks = []
+    for i in range(n_layers):
+        mask = torch.zeros(dim)
+        # alterna 1 e 0 con shift layer per layer
+        mask[i % 2::2] = 1
+        masks.append(mask)
+    return masks
