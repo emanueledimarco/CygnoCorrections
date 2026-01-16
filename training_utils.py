@@ -139,6 +139,7 @@ class ConditionalFlow(nn.Module):
         self.n_layers=n_layers
         self.hidden_dim=hidden_dim
         self.context_dim=context_dim
+        self.masks=masks
         self.layers = nn.ModuleList([
             ConditionalAffineCoupling(
                 dim=dim,
@@ -182,6 +183,7 @@ class ConditionalFlow(nn.Module):
             "n_layers": self.n_layers,
             "hidden_dim": self.hidden_dim,
             "context_dim": self.context_dim,
+            "masks": self.masks,
         }
 
 def sanity_check_flow(flow, context_encoder, device="cpu"):
@@ -467,12 +469,12 @@ class SimulationCorrection():
 
         self.D = next(iter(self.dataset))["A_sim"].shape[1] # numero di variabili
 
-        masks = generate_alternating_masks(self.D, self.flow_n_layers)
+        self.masks = generate_alternating_masks(self.D, self.flow_n_layers)
 
         self.flow = ConditionalFlow(dim=self.D,
                                     n_layers=self.flow_n_layers,
                                     hidden_dim=self.flow_hidden_dim,
-                                    masks=masks,
+                                    masks=self.masks,
                                     context_dim=self.flow_context_dim).to(self.device)
         
         self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
@@ -542,7 +544,7 @@ class SimulationCorrection():
                         "best_step": step,
                         "best_val_mmd": best_val_mmd,
                         "sigma_mmd": self.sigma_mmd,
-                        "lambda_id": self.lambda_id,
+                        "lambda_id": self.lambda_id
                     }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
          
                     print(f"  ✓ new best model at step {step}")
@@ -678,3 +680,42 @@ def generate_alternating_masks(dim, n_layers):
         mask[i % 2::2] = 1
         masks.append(mask)
     return masks
+
+
+
+
+
+### da mettere in un py file separato
+
+# A_sim, A_data: torch.Tensor (N_events, N_features)
+# A_corr: output del flow (N_events, N_features)
+# Assicurati che siano tutti float32 e sullo stesso device
+
+def print_numeric_validation(A_sim,A_data,A_corr):
+    # Trasforma eventuali batch in (N, D)
+    if A_sim.ndim == 3:
+        A_sim = A_sim.squeeze(0)
+    if A_data.ndim == 3:
+        A_data = A_data.squeeze(0)
+    if A_corr.ndim == 3:
+        A_corr = A_corr.squeeze(0)
+
+    # Media e deviazione standard
+    mean_sim  = A_sim.mean(0)
+    std_sim   = A_sim.std(0)
+
+    mean_corr = A_corr.mean(0)
+    std_corr  = A_corr.std(0)
+
+    mean_data = A_data.mean(0)
+    std_data  = A_data.std(0)
+
+    print("Feature-wise mean:")
+    print("sim  :", mean_sim)
+    print("corr :", mean_corr)
+    print("data :", mean_data)
+
+    print("\nFeature-wise std:")
+    print("sim  :", std_sim)
+    print("corr :", std_corr)
+    print("data :", std_data)

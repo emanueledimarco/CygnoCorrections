@@ -13,7 +13,7 @@ import json
 
 
 from flow_datasets import UnpairedTransportDataset, build_val_case
-from training_utils import SimulationCorrection, load_model, atomic_flow_test
+from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation
 from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
 
@@ -156,7 +156,6 @@ if __name__ == "__main__":
                 device=device
         )
         
-     
         
     # ---  VALIDATION --- #
     elif args.validate:
@@ -212,6 +211,10 @@ if __name__ == "__main__":
             A_corr.detach().cpu().numpy(),
             columns=A_sim_df.columns
         )
+
+        # validazione numerica:
+        print_numeric_validation(A_sim,A_data,A_corr)
+
         
         # --- CREAZIONE VALIDATOR --- #
         path_to_plots = "./plot/validation_plots/"
