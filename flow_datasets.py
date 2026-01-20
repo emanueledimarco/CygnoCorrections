@@ -2,41 +2,33 @@ import torch
 from torch.utils.data import Dataset
 import pandas as pd
 import numpy as np
+import random
 
-class UnpairedTransportDataset(Dataset):
-    def __init__(self, source_data, target_data, device="cpu", dtype=torch.float32):
-        """
-        source_data: dict[key -> pandas.DataFrame OR np.ndarray OR torch.Tensor]
-        target_data: dict[key -> pandas.DataFrame OR np.ndarray OR torch.Tensor]
-        """
-        self.device = device
-        self.dtype = dtype
-
-        self.src_keys = list(source_data.keys())
-        self.tgt_keys = list(target_data.keys())
-
-        self.source = {k: self._to_tensor(v) for k, v in source_data.items()}
-        self.target = {k: self._to_tensor(v) for k, v in target_data.items()}
-
-    def _to_tensor(self, x):
-        if torch.is_tensor(x):
-            return x.to(self.device, self.dtype)
-        return torch.tensor(x.values, dtype=self.dtype, device=self.device)
+class UnpairedTransportDataset(torch.utils.data.Dataset):
+    def __init__(self, source_data, target_data, dtype=torch.float32):
+        self.source_keys = list(source_data.keys())
+        self.target_keys = list(target_data.keys())
+        self.dtype=dtype
+        
+        self.source_data = source_data
+        self.target_data = target_data
 
     def __len__(self):
-        # lunghezza = max, oppure numero di accoppiamenti che vuoi
-        return max(len(self.src_keys), len(self.tgt_keys))
+        return max(len(self.source_keys), len(self.target_keys))
 
     def __getitem__(self, idx):
-        # sampling indipendente (unpaired!)
-        src_key = self.src_keys[idx % len(self.src_keys)]
-        tgt_key = self.tgt_keys[torch.randint(len(self.tgt_keys), (1,)).item()]
+        # scegli indipendentemente
+        sim_key  = self.source_keys[idx % len(self.source_keys)]
+        data_key = random.choice(self.target_keys)
+
+        A_sim_df  = self.source_data[sim_key]
+        A_data_df = self.target_data[data_key]
 
         return {
-            "A_sim": self.source[src_key],
-            "A_data": self.target[tgt_key],
-            "sim_key": torch.tensor(src_key, device=self.device),
-            "data_key": torch.tensor(tgt_key, device=self.device),
+            "A_sim":  torch.tensor(A_sim_df.values, dtype=self.dtype),
+            "A_data": torch.tensor(A_data_df.values, dtype=self.dtype),
+            "sim_key": torch.tensor(sim_key, dtype=self.dtype),
+            "data_key": torch.tensor(data_key, dtype=self.dtype),
         }
     
 def to_tensor(x, device, dtype=torch.float32):

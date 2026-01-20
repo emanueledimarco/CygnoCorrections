@@ -108,8 +108,7 @@ if __name__ == "__main__":
      
         dataset = UnpairedTransportDataset(
             source_data,
-            target_data,
-            device=device
+            target_data
         )
 
         val_case = build_val_case(

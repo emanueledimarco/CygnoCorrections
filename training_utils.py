@@ -270,6 +270,21 @@ def mmd_loss(x, y, sigma=1.0, sigma_datadriven=True):
     Kxy = gaussian_kernel(x, y, sigma).mean()
     return Kxx + Kyy - 2 * Kxy
 
+def conditional_mmd(A_corr, A_data, min_events=20, sigma=1.0, sigma_datadriven=True):
+    """
+    A_corr: (N1, D)
+    A_data: (N2, D)
+    """
+    if A_corr.shape[0] < min_events or A_data.shape[0] < min_events:
+        return None
+
+    return mmd_loss(
+        A_corr,
+        A_data,
+        sigma=sigma,
+        sigma_datadriven=sigma_datadriven,
+    )
+
 def identity_loss(flow, A_src, context, weight=1.0):
     """
     Penalizza deviazioni quando la trasformazione dovrebbe
@@ -339,12 +354,22 @@ def train_step(
     context_encoder.train()
     optimizer.zero_grad()
 
+    assert batch["A_sim"].shape[-1] == flow.dim
+    
     # --- selezione dati ---
-    A_sim_full = batch["A_sim"].to(device)
-    A_data_full = batch["A_data"].to(device)
+    ## EDM prima
+    ##A_sim_full = batch["A_sim"] #.to(device)
+    ##A_data_full = batch["A_data"] #.to(device)
 
-    # subsampling dei dataset in batch di n_events ciascuno
-    N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0])
+    A_sim_full  = batch["A_sim"]    # (Ns, D)
+    A_data_full = batch["A_data"]   # (Nd, D)
+
+    sim_key  = batch["sim_key"].view(-1)     # (Cs,) # view(-1) serve a prendere solo l'array piatto del batch, perche' il batch viene dal DataLoader
+    data_key = batch["data_key"].view(-1)    # (Cd,)
+    
+    # subsampling coerente dei dataset in batch di n_events ciascuno
+    #N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0]) ## EDM prima
+    N = min(len(A_sim_full), len(A_data_full), n_events)
     A_sim_sub  = subsample_dynamic(A_sim_full, N, device=A_sim_full.device)
     A_data_sub = subsample_dynamic(A_data_full, N, device=A_data_full.device)
 
@@ -355,8 +380,18 @@ def train_step(
         A_data_sub = A_data_full.clone()
 
     # --- Costruzione del contesto ---
-    context = build_context_batch(batch, test_identity=test_identity, device=device)
+    # --- fundamental (previous bug): context event by event, so for each batch, the context
+    #     (alpha,beta,x,y) is always the same
+    context_vals = torch.cat([sim_key, data_key], dim=0)  # (C=Cs+Cd,)
+
+    context = context_vals.unsqueeze(0).expand(N, -1)  # (N,C)
+    assert context_vals.dim() == 1, context_vals.shape
+    assert context.shape == (N, context_vals.numel())
     cond = context_encoder(context)
+
+    ## EDM prima
+    ##context = build_context_batch(batch, test_identity=test_identity, device=device)
+    ##cond = context_encoder(context)
 
     # --- forward pass ---
     A_corr, _ = flow(A_sim_sub, cond)
@@ -377,12 +412,28 @@ def train_step(
             }
         # MMD loss solo se non identity test
         if A_data_sub.shape[1] == 0:
-            id_loss = torch.tensor(0.0, device=A_corr.device)
-            loss_mmd = torch.tensor(0.0, device=device)
+            ## EDM prima
+            #id_loss = torch.tensor(0.0, device=A_corr.device)
+            #loss_mmd = torch.tensor(0.0, device=device)
+            return {
+                "loss": None,
+                "loss_mmd": None,
+                "loss_id": None,
+                "skip": True
+            }
         else:
             id_loss = torch.tensor(0.0, device=A_corr.device)
-            loss_mmd = mmd_loss(A_corr, A_data_sub, sigma=sigma_mmd, sigma_datadriven=True)
-
+            ## EDM prima
+            #loss_mmd = mmd_loss(A_corr, A_data_sub, sigma=sigma_mmd, sigma_datadriven=True)
+            loss_mmd = conditional_mmd(A_corr, A_data_sub, min_events=20, sigma=sigma_mmd)
+            if loss_mmd is None:
+                return {
+                    "loss": None,
+                    "loss_mmd": None,
+                    "loss_id": None,
+                    "skip": True
+                }
+            
     total_loss = lambda_id * id_loss + loss_mmd
     
     # --- backward ---
@@ -467,7 +518,7 @@ class SimulationCorrection():
     # performs the training of the normalizing flows
     def setup_flow(self):
 
-        self.D = next(iter(self.dataset))["A_sim"].shape[1] # numero di variabili
+        self.D = next(iter(self.dataset))["A_sim"].shape[-1] # numero di variabili
 
         self.masks = generate_alternating_masks(self.D, self.flow_n_layers)
 
@@ -476,6 +527,8 @@ class SimulationCorrection():
                                     hidden_dim=self.flow_hidden_dim,
                                     masks=self.masks,
                                     context_dim=self.flow_context_dim).to(self.device)
+
+        assert self.flow.dim == self.D
         
         self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
         sanity_check_coupling(self.flow, self.context_encoder, device=self.device)
@@ -522,7 +575,14 @@ class SimulationCorrection():
                     f"MMD {losses['loss_mmd']:.4f} | "
                     f"ID {losses['loss_id']:.4f}"
                 )
-         
+            if step == 100:
+                with torch.no_grad():
+                    ### sto qua
+                    #A_corr1 = flow(A_sim_sub, cond1)
+                    #A_corr2 = flow(A_sim_sub, cond2)
+
+print("Δ corr:", torch.mean(torch.abs(A_corr1 - A_corr2)))
+                
             # ---- VALIDAZIONE PERIODICA ----
             # ---- qui l'implementazione dell'Early Stopping --- 
             if step % val_every == 0 and step > 0:
