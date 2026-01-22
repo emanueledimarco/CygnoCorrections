@@ -327,16 +327,17 @@ def subsample_dynamic(A, n_max, device="cpu"):
         raise ValueError(f"Unsupported tensor shape: {A.shape}")
     
 def train_step(
-    flow,
-    context_encoder,
-    optimizer,
-    batch,
-    n_events=50,
-    lambda_id=0.1,
-    sigma_mmd=1.0,
-    test_identity=False,
-    device="cpu"
-):
+        step,
+        flow,
+        context_encoder,
+        optimizer,
+        batch,
+        scalers,
+        n_events=50,
+        lambda_id=0.1,
+        sigma_mmd=1.0,
+        test_identity=False,
+        device="cpu"):
     """
     Step di training / identity test per un batch.
     flow: ConditionalFlow
@@ -361,12 +362,32 @@ def train_step(
     ##A_sim_full = batch["A_sim"] #.to(device)
     ##A_data_full = batch["A_data"] #.to(device)
 
-    A_sim_full  = batch["A_sim"]    # (Ns, D)
-    A_data_full = batch["A_data"]   # (Nd, D)
+    A_sim_full  = batch["A_sim"]
+    A_data_full = batch["A_data"]
 
+    # rimuovi dimensione batch fittizia
+    A_sim_full  = batch["A_sim"].squeeze(0)    # (Ns, D)
+    A_data_full = batch["A_data"].squeeze(0)   # (Nd, D)
+
+    # NB. Il DataLoader prende solo 1 chiave per batch (batch_size=1) => 1 sola chiave per sim, e 1 per data. Quindi posso normalizzare / chiave
     sim_key  = batch["sim_key"].view(-1)     # (Cs,) # view(-1) serve a prendere solo l'array piatto del batch, perche' il batch viene dal DataLoader
     data_key = batch["data_key"].view(-1)    # (Cd,)
-    
+
+    # standardizzazione
+    print("key = ",sim_key)
+    mu = batch["mu"].view(-1)
+    std = batch["std"].view(-1)
+    if step==0:
+        print("sim_key = ",sim_key)
+        print("Tensor full = ",A_sim_full)
+        print(f"mu={mu},std={std}")
+    A_sim_full = (A_sim_full - mu) / std
+    if step==0:
+        print("Tensor scaled = ",A_sim_full)
+
+    ## arrivato quaaaa
+    exit(0)
+        
     # subsampling coerente dei dataset in batch di n_events ciascuno
     #N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0]) ## EDM prima
     N = min(len(A_sim_full), len(A_data_full), n_events)
@@ -465,20 +486,20 @@ def compute_val_mmd(flow, context_encoder, val_case, n_events, sigma_mmd=1.0):
     loss = mmd_loss(A_corr, A_data)
     return loss
 
+def standardize(x, mu, std):
+    return (x - mu) / std
+
 class SimulationCorrection():
 
-    def __init__(self, configuration, dataset,
+    def __init__(self, configuration, dataset,standardize,
                  encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
                  flow_n_layers, flow_hidden_dim, flow_context_dim,
                  initial_lr, batch_size, sigma_mmd, lambda_id):
 
         # Name of the variables used as conditions and during training
         self.dataset = dataset
+        self.standardize = standardize
         
-        # if False, the inputs are not standardized!
-        self.perform_std_transform     = False
-        print( 'Standardization: ', self.perform_std_transform )
-
         # Checking if cuda is avaliable
         print('Checking cuda avaliability: ', torch.cuda.is_available())
         device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
@@ -566,7 +587,7 @@ class SimulationCorrection():
         
         for step, batch in enumerate(loader):
 
-            losses = train_step(self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
+            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, self.dataset.scalers, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
             if losses.get("skip", False):
                 continue
             if step % 100 == 0:
@@ -575,13 +596,13 @@ class SimulationCorrection():
                     f"MMD {losses['loss_mmd']:.4f} | "
                     f"ID {losses['loss_id']:.4f}"
                 )
-            if step == 100:
-                with torch.no_grad():
-                    ### sto qua
-                    #A_corr1 = flow(A_sim_sub, cond1)
-                    #A_corr2 = flow(A_sim_sub, cond2)
+            # if step == 100:
+            #     with torch.no_grad():
+            #         ### sto qua
+            #         #A_corr1 = flow(A_sim_sub, cond1)
+            #         #A_corr2 = flow(A_sim_sub, cond2)
 
-print("Δ corr:", torch.mean(torch.abs(A_corr1 - A_corr2)))
+            #         print("Δ corr:", torch.mean(torch.abs(A_corr1 - A_corr2)))
                 
             # ---- VALIDAZIONE PERIODICA ----
             # ---- qui l'implementazione dell'Early Stopping --- 

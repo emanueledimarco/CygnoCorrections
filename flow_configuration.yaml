@@ -29,4 +29,4 @@ configuration_2026_lime_v1:
     batch_size           : 50
     sigma_mmd            : 1.0
     lambda_id            : 1.0
-    
+    standardize          : 1

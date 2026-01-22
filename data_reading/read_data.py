@@ -32,21 +32,26 @@ def calculate_bins_position(array, num_bins=12):
     
     return bin_edges
 
-def perform_cluster_selection(arrays):
-    # Define individual selection criteria
-    mask = (
-        (arrays["sc_integral"] > 500) &
-        (arrays["sc_integral"] < 10000) &
-        (arrays["sc_xmean"] > 800) &
-        (arrays["sc_xmean"] < 1500) &
-        (arrays["sc_ymean"] > 800) &
-        (arrays["sc_ymean"] < 1500)
-    )
+def perform_cluster_selection(arrays,isdata):
+    if isdata: 
+        # Define individual selection criteria
+        # basically remove noise at low LY and borders of the sensor
+        mask = (
+            (arrays["sc_integral"] > 2000) &
+            (arrays["sc_integral"] < 10000) &
+            (arrays["sc_xmean"] > 500) &
+            (arrays["sc_xmean"] < 2000) &
+            (arrays["sc_ymean"] > 500) &
+            (arrays["sc_ymean"] < 2000)
+        )
 
-    # Apply mask to filter DataFrame
-    return arrays[mask]
+        # Apply mask to filter DataFrame
+        return arrays[mask]
+    else:
+        # no noise, no border effects in sim (for now)
+        return arrays
 
-def read_reco_data_withselection(variables, spectators, rootfiles, return_spectators=False, verbose=True):
+def read_reco_data_withselection(variables, spectators, rootfiles, isdata, return_spectators=False, verbose=True):
     branches = variables+spectators
     data_dfs = []
     for data_file in rootfiles:
@@ -55,7 +60,7 @@ def read_reco_data_withselection(variables, spectators, rootfiles, return_specta
         with uproot.open(data_file) as f:
             tree = f["Events"]
             arrays = tree.arrays(branches, library="ak")
-            arrays_sel = perform_cluster_selection(arrays)
+            arrays_sel = perform_cluster_selection(arrays,isdata)
             df = pd.DataFrame({
                 v: ak.flatten(arrays_sel[v]).to_numpy()
                 for v in branches

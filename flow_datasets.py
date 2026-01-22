@@ -5,13 +5,38 @@ import numpy as np
 import random
 
 class UnpairedTransportDataset(torch.utils.data.Dataset):
-    def __init__(self, source_data, target_data, dtype=torch.float32):
-        self.source_keys = list(source_data.keys())
-        self.target_keys = list(target_data.keys())
+    def __init__(self, source_data, target_data, standardize=True, dtype=torch.float32):
+        
+        # this is to filter out empty datasets after the pre-selections
+        valid_sim_keys = [
+            k for k, df in source_data.items()
+            if len(df) > 0
+        ]
+
+        valid_data_keys = [
+            k for k, df in target_data.items()
+            if len(df) > 0
+        ]
+        
+        self.source_keys = valid_sim_keys #list(source_data.keys())
+        self.target_keys = valid_data_keys #list(target_data.keys())
         self.dtype=dtype
         
         self.source_data = source_data
         self.target_data = target_data
+
+        self.standardize = standardize
+        # pre-calcolo mu/std per chiave
+        self.scalers = {}
+        if self.standardize:
+            print("Standardizing once for all the dataset...")
+            for key, df in self.source_data.items():
+                tensor = torch.tensor(df.values, dtype=torch.float32)
+                mu = tensor.mean(dim=0)
+                std = tensor.std(dim=0)
+                # attenzione: evitare std=0
+                std[std==0] = 1.0
+                self.scalers[key] = {"mu": mu, "std": std}
 
     def __len__(self):
         return max(len(self.source_keys), len(self.target_keys))
@@ -24,11 +49,19 @@ class UnpairedTransportDataset(torch.utils.data.Dataset):
         A_sim_df  = self.source_data[sim_key]
         A_data_df = self.target_data[data_key]
 
+        if len(A_sim_df) == 0:
+            print("WARNING! EMPTY SIM KEY:", sim_key)
+
+        if len(A_data_df) == 0:
+            print("WARNING! EMPTY DATA KEY:", data_key)
+    
         return {
             "A_sim":  torch.tensor(A_sim_df.values, dtype=self.dtype),
             "A_data": torch.tensor(A_data_df.values, dtype=self.dtype),
             "sim_key": torch.tensor(sim_key, dtype=self.dtype),
             "data_key": torch.tensor(data_key, dtype=self.dtype),
+            "mu": self.scalers[sim_key]["mu"],
+            "std": self.scalers[sim_key]["std"]
         }
     
 def to_tensor(x, device, dtype=torch.float32):

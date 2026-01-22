@@ -59,11 +59,11 @@ if __name__ == "__main__":
                 if k=="sim":
                     print("\t==> Simulation now...")
                     for mapkey,rootfname in map_dic.items():
-                        source_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname])
+                        source_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=False)
                 else:
                     print("\t==> Data now...")
                     for mapkey,rootfname in map_dic.items():
-                        target_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname])
+                        target_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=True)
                         
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")
@@ -105,10 +105,12 @@ if __name__ == "__main__":
             val_data = target_data.pop(target_key_V,None)
         else:
             print(f"Warning, the element {target_key_V} is not among the data datasets")
-     
+
+        standardize=dictionary[conf]["standardize"]
         dataset = UnpairedTransportDataset(
             source_data,
-            target_data
+            target_data,
+            standardize
         )
 
         val_case = build_val_case(
@@ -139,7 +141,7 @@ if __name__ == "__main__":
         lambda_id = dictionary[conf]["lambda_id"]
 
         # build the flow and train it
-        corrections = SimulationCorrection(str(conf),dataset,
+        corrections = SimulationCorrection(str(conf),dataset,standardize,
                                            encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
                                            flow_n_layers, flow_hidden_dim, flow_context_dim,
                                            initial_lr, batch_size, sigma_mmd, lambda_id)

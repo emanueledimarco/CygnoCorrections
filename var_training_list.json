@@ -1,8 +1,6 @@
 {
     "var_list": [
-	"sc_integral",
-	"sc_tgausssigma",
-	"sc_nhits"
+	"sc_integral"
     ],
     "spectator_list": [
 	"sc_xmean",
