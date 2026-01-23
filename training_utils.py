@@ -2,6 +2,8 @@
 import os 
 import numpy as np
 import glob
+import scipy
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -332,7 +334,6 @@ def train_step(
         context_encoder,
         optimizer,
         batch,
-        scalers,
         n_events=50,
         lambda_id=0.1,
         sigma_mmd=1.0,
@@ -374,31 +375,34 @@ def train_step(
     data_key = batch["data_key"].view(-1)    # (Cd,)
 
     # standardizzazione
-    print("key = ",sim_key)
-    mu = batch["mu"].view(-1)
-    std = batch["std"].view(-1)
+    mu_sim = batch["sim_mu"].view(-1)
+    std_sim = batch["sim_std"].view(-1)
+    mu_data = batch["data_mu"].view(-1)
+    std_data = batch["data_std"].view(-1)
     if step==0:
-        print("sim_key = ",sim_key)
-        print("Tensor full = ",A_sim_full)
-        print(f"mu={mu},std={std}")
-    A_sim_full = (A_sim_full - mu) / std
+        #print("Tensor full = ",A_sim_full)
+        print(f"Before standardization A_sim_full: mu={mu_sim},std={std_sim}")
+        print(f"Before standardization A_data_full: mu={mu_data},std={std_data}")
+    A_sim_full_scaled = standardize(A_sim_full,mu_sim,std_sim)
+    A_data_full_scaled = standardize(A_data_full,mu_data,std_data)
     if step==0:
-        print("Tensor scaled = ",A_sim_full)
-
-    ## arrivato quaaaa
-    exit(0)
+        #print("Tensor scaled = ",A_sim_full)
+        mu_aft=A_sim_full_scaled.mean(dim=0)
+        std_aft=A_sim_full_scaled.std(dim=0)
+        print(f"After standardization, A_sim_full (scaled): mu={mu_aft},std={std_aft}")
+        print(f"After standardization  A_data_full (scaled): mu={A_data_full_scaled.mean(0)},std={A_data_full_scaled.std(0)}")
         
     # subsampling coerente dei dataset in batch di n_events ciascuno
     #N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0]) ## EDM prima
-    N = min(len(A_sim_full), len(A_data_full), n_events)
-    A_sim_sub  = subsample_dynamic(A_sim_full, N, device=A_sim_full.device)
-    A_data_sub = subsample_dynamic(A_data_full, N, device=A_data_full.device)
+    N = min(len(A_sim_full_scaled), len(A_data_full_scaled), n_events)
+    A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
+    A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
 
     if A_sim_sub.shape[1] == 0:
         # fallback: copia tutti gli eventi disponibili
-        A_sim_sub = A_sim_full.clone()
+        A_sim_sub = A_sim_full_scaled.clone()
     if A_data_sub.shape[1] == 0:
-        A_data_sub = A_data_full.clone()
+        A_data_sub = A_data_full_scaled.clone()
 
     # --- Costruzione del contesto ---
     # --- fundamental (previous bug): context event by event, so for each batch, the context
@@ -415,12 +419,24 @@ def train_step(
     ##cond = context_encoder(context)
 
     # --- forward pass ---
-    A_corr, _ = flow(A_sim_sub, cond)
+    A_corr_scaled, _ = flow(A_sim_sub, cond)    
+    # print("A_sim_full mean/std:",
+    #       A_sim_full.mean().item(),
+    #       A_sim_full.std().item())
+    # print("A_sim_full_scaled mean/std:",
+    #       A_sim_full_scaled.mean().item(),
+    #       A_sim_full_scaled.std().item())
+    # print("post-flow mean/std:",
+    #       A_corr_scaled.mean().item(),
+    #       A_corr_scaled.std().item())
 
+    # if math.isnan(A_sim_full.std().item()):
+    #     print ("Problematic tensor  = ",A_sim_full)
+    
     # --- calcolo loss ---
     if test_identity:
         # Identity loss
-        id_loss = torch.mean((A_corr - A_sim_sub)**2)
+        id_loss = torch.mean((A_corr_scaled - A_sim_sub)**2)
         loss_mmd = torch.tensor(0.0, device=device)
     else:
         if A_sim_sub.shape[1] == 0 or A_data_sub.shape[1] == 0:
@@ -443,10 +459,10 @@ def train_step(
                 "skip": True
             }
         else:
-            id_loss = torch.tensor(0.0, device=A_corr.device)
+            id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
             ## EDM prima
             #loss_mmd = mmd_loss(A_corr, A_data_sub, sigma=sigma_mmd, sigma_datadriven=True)
-            loss_mmd = conditional_mmd(A_corr, A_data_sub, min_events=20, sigma=sigma_mmd)
+            loss_mmd = conditional_mmd(A_corr_scaled, A_data_sub, min_events=10, sigma=sigma_mmd)
             if loss_mmd is None:
                 return {
                     "loss": None,
@@ -454,8 +470,19 @@ def train_step(
                     "loss_id": None,
                     "skip": True
                 }
-            
-    total_loss = lambda_id * id_loss + loss_mmd
+
+    mu_corr  = A_corr_scaled.mean(0)
+    std_corr = A_corr_scaled.std(0, unbiased=False)
+    mu_data_sub = A_data_sub.mean(0)
+    std_data_sub  = A_data_sub.std(0, unbiased=False)
+
+    mean_loss = (mu_corr   - mu_data_sub ).pow(2).mean()
+    # tested: using (std_corr  - std_data_sub).pow(2).mean() shrinks the distribution (effect of few events in data_sub)
+    logstd_loss = (torch.log(std_corr) - torch.log(std_data_sub)).pow(2).mean() 
+    moment_loss = mean_loss + logstd_loss
+    rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
+    
+    total_loss = lambda_id * (id_loss + rms_loss) + loss_mmd 
     
     # --- backward ---
     optimizer.zero_grad()
@@ -587,7 +614,7 @@ class SimulationCorrection():
         
         for step, batch in enumerate(loader):
 
-            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, self.dataset.scalers, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
+            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
             if losses.get("skip", False):
                 continue
             if step % 100 == 0:
@@ -772,7 +799,7 @@ def generate_alternating_masks(dim, n_layers):
 # A_corr: output del flow (N_events, N_features)
 # Assicurati che siano tutti float32 e sullo stesso device
 
-def print_numeric_validation(A_sim,A_data,A_corr):
+def print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mean_sim,std_sim):
     # Trasforma eventuali batch in (N, D)
     if A_sim.ndim == 3:
         A_sim = A_sim.squeeze(0)
@@ -781,9 +808,9 @@ def print_numeric_validation(A_sim,A_data,A_corr):
     if A_corr.ndim == 3:
         A_corr = A_corr.squeeze(0)
 
-    # Media e deviazione standard
-    mean_sim  = A_sim.mean(0)
-    std_sim   = A_sim.std(0)
+
+    mean_sim_scaled = A_sim.mean(0)
+    std_sim_scaled  = A_sim.std(0)
 
     mean_corr = A_corr.mean(0)
     std_corr  = A_corr.std(0)
@@ -791,12 +818,37 @@ def print_numeric_validation(A_sim,A_data,A_corr):
     mean_data = A_data.mean(0)
     std_data  = A_data.std(0)
 
+    mmd = mmd_loss(A_corr, A_data)
+    mmd_scaled = mmd_loss(A_corr_scaled, A_data_scaled)
+    print("MMD in scaled space:", mmd_scaled.item())
+    print("means:", A_corr_scaled.mean().item(), A_data_scaled.mean().item())
+    print("stds :", A_corr_scaled.std().item(),  A_data_scaled.std().item())
+    
+    ks = scipy.stats.ks_2samp(
+        A_corr.cpu().numpy().ravel(),
+        A_data.cpu().numpy().ravel()
+    ).statistic
+    
     print("Feature-wise mean:")
+    
+    print("sim (scaled)  :", mean_sim_scaled)
     print("sim  :", mean_sim)
     print("corr :", mean_corr)
     print("data :", mean_data)
 
     print("\nFeature-wise std:")
+    print("sim (scaled)  :", std_sim_scaled)
     print("sim  :", std_sim)
     print("corr :", std_corr)
     print("data :", std_data)
+
+    print ("Distance metrics:")
+    print("mmd  :", mmd)
+    print("ks   :", ks)
+    
+def standardize_dataset(A):
+    mean  = A.mean(0)
+    std   = A.std(0) + 1e-8
+    print(f"validation standardization: mean = {mean}, std = {std}")
+    A_scaled = (A - mean) / std
+    return (A_scaled,mean,std)

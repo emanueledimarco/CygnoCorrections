@@ -27,17 +27,9 @@ class UnpairedTransportDataset(torch.utils.data.Dataset):
 
         self.standardize = standardize
         # pre-calcolo mu/std per chiave
-        self.scalers = {}
-        if self.standardize:
-            print("Standardizing once for all the dataset...")
-            for key, df in self.source_data.items():
-                tensor = torch.tensor(df.values, dtype=torch.float32)
-                mu = tensor.mean(dim=0)
-                std = tensor.std(dim=0)
-                # attenzione: evitare std=0
-                std[std==0] = 1.0
-                self.scalers[key] = {"mu": mu, "std": std}
-
+        self.source_scalers = get_scalers(source_data)
+        self.target_scalers = get_scalers(target_data)
+        
     def __len__(self):
         return max(len(self.source_keys), len(self.target_keys))
 
@@ -60,9 +52,22 @@ class UnpairedTransportDataset(torch.utils.data.Dataset):
             "A_data": torch.tensor(A_data_df.values, dtype=self.dtype),
             "sim_key": torch.tensor(sim_key, dtype=self.dtype),
             "data_key": torch.tensor(data_key, dtype=self.dtype),
-            "mu": self.scalers[sim_key]["mu"],
-            "std": self.scalers[sim_key]["std"]
+            "sim_mu": self.source_scalers[sim_key]["mu"],
+            "sim_std": self.source_scalers[sim_key]["std"],
+            "data_mu": self.target_scalers[data_key]["mu"],
+            "data_std": self.target_scalers[data_key]["std"],
         }
+
+def get_scalers(dataframe_dic):
+    scalers = {}
+    for key, df in dataframe_dic.items():
+        tensor = torch.tensor(df.values, dtype=torch.float32)
+        mu = tensor.mean(dim=0)
+        std = tensor.std(dim=0)
+        # attenzione: evitare std=0
+        std[std==0] = 1.0
+        scalers[key] = {"mu": mu, "std": std}
+    return scalers
     
 def to_tensor(x, device, dtype=torch.float32):
     if torch.is_tensor(x):

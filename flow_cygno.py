@@ -13,7 +13,7 @@ import json
 
 
 from flow_datasets import UnpairedTransportDataset, build_val_case
-from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation
+from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset
 from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
 
@@ -75,6 +75,7 @@ if __name__ == "__main__":
         source_data = pd.read_pickle(f"{cachedir}/source_data.pkl")
         target_data = pd.read_pickle(f"{cachedir}/target_data.pkl")
 
+    standardize=dictionary[conf]["standardize"]
 
     # --- TRAINING ---- #
     if args.train: 
@@ -106,7 +107,6 @@ if __name__ == "__main__":
         else:
             print(f"Warning, the element {target_key_V} is not among the data datasets")
 
-        standardize=dictionary[conf]["standardize"]
         dataset = UnpairedTransportDataset(
             source_data,
             target_data,
@@ -184,7 +184,7 @@ if __name__ == "__main__":
 
         src_key_0 = (ztrue0,alpha0,lambda0)
         tgt_key_0 = (Z0,P0,T0)
-        
+
         # context construction
         src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
         tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
@@ -195,27 +195,62 @@ if __name__ == "__main__":
         A_data_df = target_data[tgt_key_0]
         A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
         A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
-
-        cond = context_encoder(context)
-
+        if standardize:
+            A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
+            A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
+        
         # --- APPLICA FLOW PER LA VALIDAZIONE --- #
         print ("EVALUATE FLOW")
-        # replica il context per ogni evento di A_sim
-        context_rep = context.repeat(A_sim.shape[0], 1)
+        # replica il context per ogni evento di A_sim_scaled
+        context_rep = context.repeat(A_sim_scaled.shape[0], 1)
+
+        # only for the test
+        src_key_rand = torch.tensor((15.0,0.0230,1850), dtype=torch.float32, device=device)
+        tgt_key_rand = torch.tensor((25.0,0.9031,21.1), dtype=torch.float32, device=device)
+        context_random = torch.cat([src_key_rand,tgt_key_rand]).unsqueeze(0)
+        context_random_rep = context_random.repeat(A_sim_scaled.shape[0], 1)
+        
+        # permuta A_sim_scaled
+        perm = torch.randperm(A_sim_scaled.shape[0])
+        A_sim_scaled_perm = A_sim_scaled[perm]
+
         with torch.no_grad():
             cond = context_encoder(context_rep)
-            A_corr, _ = flow(A_sim, cond)
+            A_corr_scaled, _ = flow(A_sim_scaled, cond)
+            cond_random = context_encoder(context_random_rep)
+            A_corr2, _ = flow(A_sim_scaled, cond_random)
+            A_corr_perm, _ = flow(A_sim_scaled_perm, cond)
+
+
+        delta = torch.mean((A_corr_scaled - A_corr2)**2).item()
+        print("Context sensitivity:", delta)
+        print("Permutation test:", torch.mean((A_corr_scaled - A_corr_perm)**2))
+        
+        if standardize:
+            print("De-standardize A_corr")
+            print(f"A_corr (scaled): mean={A_corr_scaled.mean(0)}, std={A_corr_scaled.std(0)}")
+            A_corr = A_corr_scaled * std_data + mu_data
+            A_corr2 = A_corr2 * std_data + mu_data
+            print(f"A_corr (un-scaled): mean={A_corr.mean(0)}, std={A_corr.std(0)}")
+
         print("FLOW done")
 
-        # A_corr torch → pandas with the same structure of A_sim (to plot)
+        # A_corr torch → pandas with the same structure of A_sim_scaled (to plot)
         A_corr_df = pd.DataFrame(
             A_corr.detach().cpu().numpy(),
             columns=A_sim_df.columns
         )
 
         # validazione numerica:
-        print_numeric_validation(A_sim,A_data,A_corr)
+        print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mu_sim,std_sim)
 
+        import matplotlib.pyplot as plt
+        plt.hist(A_sim.cpu(), bins=50, density=True, alpha=0.4, label="sim")
+        plt.hist(A_data.cpu(), bins=50, density=True, alpha=0.4, label="data")
+        plt.hist(A_corr.cpu(), bins=50, density=True, alpha=0.4, label="corr")
+        plt.legend()
+        plt.show()
+        
         
         # --- CREAZIONE VALIDATOR --- #
         path_to_plots = "./plot/validation_plots/"
