@@ -1,3 +1,4 @@
+import os
 import yaml
 import numpy as np
 import pandas as pd
@@ -17,8 +18,12 @@ def make_simulation_map(output_file="simulation_map.yaml"):
                 for step in range(1,6):
                     filename = f"data/sim/test_recosim/digi_{a}-{l}/iron_step{step}/reco_run0000{z}_3D.root"
                     if Path(filename).exists():
-                        key = f"{zpos_dic[z]},{alpha:.4f},{Lambda:.0f}"
-                        sim_dict[key] = filename
+                        # remove the files that have only a tiny number of clusters reco (this is a sign of sim/digi/reco problem, not physics)
+                        size_bytes = os.path.getsize(filename)
+                        size_kb = size_bytes / 1024 
+                        if size_kb>100:
+                            key = f"{zpos_dic[z]},{alpha:.4f},{Lambda:.0f}"
+                            sim_dict[key] = filename
 
     with open(output_file, "w") as f:
         yaml.safe_dump(sim_dict, f, sort_keys=True, default_flow_style=False)
