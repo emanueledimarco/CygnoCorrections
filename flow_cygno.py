@@ -88,7 +88,7 @@ if __name__ == "__main__":
         ztrueV  = float(dictionary["data_inputs"]["ztrue_ref"])
         PV      = float(dictionary["data_inputs"]["P_ref"])
         TV      = float(dictionary["data_inputs"]["T_ref"])
-        ZV      = float(dictionary["data_inputs"]["Z_ref"])
+        ZV      = ztrueV   # float(dictionary["data_inputs"]["Z_ref"])
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
      
@@ -122,7 +122,7 @@ if __name__ == "__main__":
         )
         
         # context configuration
-        raw_context_dim = len(source_key_V) + len(target_key_V)
+        raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
         encoder_input_dim  = raw_context_dim
         encoder_hidden_dim = dictionary[conf]["encoder_hidden_dim"]
         encoder_output_dim = dictionary[conf]["encoder_output_dim"]
@@ -180,7 +180,7 @@ if __name__ == "__main__":
         ztrue0=dictionary["data_inputs"]["ztrue_val"]
         P0=dictionary["data_inputs"]["P_val"]
         T0=dictionary["data_inputs"]["T_val"]
-        Z0=dictionary["data_inputs"]["Z_val"]
+        Z0=ztrue0
 
         src_key_0 = (ztrue0,alpha0,lambda0)
         tgt_key_0 = (Z0,P0,T0)
@@ -188,7 +188,8 @@ if __name__ == "__main__":
         # context construction
         src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
         tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
-        context = torch.cat([src_key_0_t,tgt_key_0_t]).unsqueeze(0)
+        tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
+        context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).unsqueeze(0)
 
         # dataframe -> torch tensors conversion
         A_sim_df  = source_data[src_key_0]
@@ -206,7 +207,7 @@ if __name__ == "__main__":
 
         # only for the test
         src_key_rand = torch.tensor((15.0,0.0230,1850), dtype=torch.float32, device=device)
-        tgt_key_rand = torch.tensor((25.0,0.9031,21.1), dtype=torch.float32, device=device)
+        tgt_key_rand = torch.tensor((0.9031,21.1), dtype=torch.float32, device=device)
         context_random = torch.cat([src_key_rand,tgt_key_rand]).unsqueeze(0)
         context_random_rep = context_random.repeat(A_sim_scaled.shape[0], 1)
         

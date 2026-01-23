@@ -102,8 +102,9 @@ def build_val_case(
     # --- context ---
     src_key_t = torch.tensor(src_key, device=device, dtype=dtype)
     tgt_key_t = torch.tensor(tgt_key, device=device, dtype=dtype)
-
-    context = torch.cat([src_key_t, tgt_key_t]).unsqueeze(0)  # (1, C)
+    tgt_key_t_reduced = tgt_key_t[..., 1:] # remove Z from the target context
+    
+    context = torch.cat([src_key_t, tgt_key_t_reduced]).unsqueeze(0)  # (1, C)
 
     return {
         "A_sim": A_sim,

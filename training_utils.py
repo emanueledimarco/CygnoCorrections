@@ -374,6 +374,9 @@ def train_step(
     sim_key  = batch["sim_key"].view(-1)     # (Cs,) # view(-1) serve a prendere solo l'array piatto del batch, perche' il batch viene dal DataLoader
     data_key = batch["data_key"].view(-1)    # (Cd,)
 
+    # === REMOVE OBSERVED Z FROM THE CONTEXT, TO FORCE 1:1 MAPPING BETWEEN SIM AND DATA ===
+    data_key_reduced = data_key[..., 1:]
+    
     # standardizzazione
     mu_sim = batch["sim_mu"].view(-1)
     std_sim = batch["sim_std"].view(-1)
@@ -398,6 +401,11 @@ def train_step(
     A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
     A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
 
+    sigma_noise = 0.2   # valore iniziale consigliato
+    noise = sigma_noise * torch.randn_like(A_sim_sub)
+    A_sim_noisy = A_sim_sub + noise
+
+    
     if A_sim_sub.shape[1] == 0:
         # fallback: copia tutti gli eventi disponibili
         A_sim_sub = A_sim_full_scaled.clone()
@@ -407,19 +415,15 @@ def train_step(
     # --- Costruzione del contesto ---
     # --- fundamental (previous bug): context event by event, so for each batch, the context
     #     (alpha,beta,x,y) is always the same
-    context_vals = torch.cat([sim_key, data_key], dim=0)  # (C=Cs+Cd,)
+    context_vals = torch.cat([sim_key, data_key_reduced], dim=0)  # (C=Cs+Cd,)
 
     context = context_vals.unsqueeze(0).expand(N, -1)  # (N,C)
     assert context_vals.dim() == 1, context_vals.shape
     assert context.shape == (N, context_vals.numel())
     cond = context_encoder(context)
 
-    ## EDM prima
-    ##context = build_context_batch(batch, test_identity=test_identity, device=device)
-    ##cond = context_encoder(context)
-
     # --- forward pass ---
-    A_corr_scaled, _ = flow(A_sim_sub, cond)    
+    A_corr_scaled, _ = flow(A_sim_noisy, cond)    
     # print("A_sim_full mean/std:",
     #       A_sim_full.mean().item(),
     #       A_sim_full.std().item())
@@ -482,7 +486,7 @@ def train_step(
     moment_loss = mean_loss + logstd_loss
     rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
     
-    total_loss = lambda_id * (id_loss + rms_loss) + loss_mmd 
+    total_loss = loss_mmd 
     
     # --- backward ---
     optimizer.zero_grad()
@@ -744,35 +748,6 @@ def atomic_flow_test(flow, dim_x, dim_c, device="cpu"):
         print(f"[ATOMIC TEST] max |x - inverse(forward(x))| = {max_err:.3e}")
 
         assert max_err < 1e-5, "Atomic test FAILED"
-
-def build_context_batch(batch, test_identity=False, device='cpu'):
-    """
-    Costruisce il tensore context batch robustamente.
-    
-    batch: dict con chiavi 'sim_key' e 'data_key'
-    test_identity: se True, prende sim_key come source e target
-    device: 'cpu' o 'cuda'
-    
-    Ritorna: context di shape (n_events, n_context_features)
-    """
-    # Scegli le chiavi
-    key_src = batch["data_key"] if not test_identity else batch["sim_key"]
-    key_tgt = batch["data_key"] if not test_identity else batch["sim_key"]
-
-    # Se è un tensore scalare o ha più dimensioni, riducilo a 1D
-    key_src = key_src.flatten()
-    key_tgt = key_tgt.flatten()
-
-    # Concateniamo le feature di contesto
-    context = torch.cat([key_src, key_tgt], dim=0)  # (n_features,)
-
-    # Trasformiamo in batch ripetendo per ogni evento
-    n_events = batch["A_sim"].shape[0]
-    context = context.unsqueeze(0).expand(n_events, -1)  # (n_events, n_features)
-
-    return context.to(device)
-
-import torch
 
 def generate_alternating_masks(dim, n_layers):
     """
