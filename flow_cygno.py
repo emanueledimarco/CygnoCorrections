@@ -137,14 +137,13 @@ if __name__ == "__main__":
         # general training parameters
         initial_lr = dictionary[conf]["initial_lr"]
         batch_size = dictionary[conf]["batch_size"]
-        sigma_mmd = dictionary[conf]["sigma_mmd"]
-        lambda_id = dictionary[conf]["lambda_id"]
+        lambda_mom = dictionary[conf]["lambda_mom"]
 
         # build the flow and train it
         corrections = SimulationCorrection(str(conf),dataset,standardize,
                                            encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
                                            flow_n_layers, flow_hidden_dim, flow_context_dim,
-                                           initial_lr, batch_size, sigma_mmd, lambda_id)
+                                           initial_lr, batch_size, lambda_mom)
         corrections.setup_flow()
         corrections.set_validation_case(val_case)
         corrections.train_the_flow(test_identity=args.atomictest)
@@ -243,14 +242,16 @@ if __name__ == "__main__":
         )
 
         # validazione numerica:
-        print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mu_sim,std_sim)
+        print_numeric_validation(A_sim_scaled,A_data_scaled,A_corr_scaled)
 
         import matplotlib.pyplot as plt
+        #plt.ion()
         plt.hist(A_sim.cpu(), bins=50, density=True, alpha=0.4, label="sim")
         plt.hist(A_data.cpu(), bins=50, density=True, alpha=0.4, label="data")
         plt.hist(A_corr.cpu(), bins=50, density=True, alpha=0.4, label="corr")
         plt.legend()
-        plt.show()
+        plt.savefig("basic_test.pdf")
+        plt.show(block=False)
         
         
         # --- CREAZIONE VALIDATOR --- #

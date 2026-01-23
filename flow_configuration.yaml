@@ -12,7 +12,7 @@ data_inputs:
     alpha_val  : 0.0218
     lambda_val : 1650
     ztrue_val  : 25.0
-    P_val      : 0.9070
+    P_val      : 0.9170
     T_val      : 20.6
 
 
@@ -27,5 +27,5 @@ configuration_2026_lime_v1:
     initial_lr           : 5.0e-4
     batch_size           : 50
     sigma_mmd            : 1.0
-    lambda_id            : 1.0
+    lambda_mom           : 0
     standardize          : 1

@@ -335,8 +335,7 @@ def train_step(
         optimizer,
         batch,
         n_events=50,
-        lambda_id=0.1,
-        sigma_mmd=1.0,
+        lambda_mom=0.1,
         test_identity=False,
         device="cpu"):
     """
@@ -346,8 +345,7 @@ def train_step(
     optimizer: torch optimizer
     batch: dict con 'sim_key', 'data_key', 'A_sim', 'A_data'
     n_events: numero di eventi da sottocampionare
-    lambda_id: peso ID loss
-    sigma_mmd: parametro del kernel MMD
+    lambda_mom: peso ID loss
     test_identity: se True usa A_src = A_data
     device: torch device
     """
@@ -401,7 +399,7 @@ def train_step(
     A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
     A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
 
-    sigma_noise = 0.2   # valore iniziale consigliato
+    sigma_noise = 0.5   # valore iniziale consigliato
     noise = sigma_noise * torch.randn_like(A_sim_sub)
     A_sim_noisy = A_sim_sub + noise
 
@@ -448,7 +446,7 @@ def train_step(
             return {
                 "loss": None,
                 "loss_mmd": None,
-                "loss_id": None,
+                "moment_loss": None,
                 "skip": True
             }
         # MMD loss solo se non identity test
@@ -459,19 +457,18 @@ def train_step(
             return {
                 "loss": None,
                 "loss_mmd": None,
-                "loss_id": None,
+                "moment_loss": None,
                 "skip": True
             }
         else:
             id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
             ## EDM prima
-            #loss_mmd = mmd_loss(A_corr, A_data_sub, sigma=sigma_mmd, sigma_datadriven=True)
-            loss_mmd = conditional_mmd(A_corr_scaled, A_data_sub, min_events=10, sigma=sigma_mmd)
+            loss_mmd = conditional_mmd(A_corr_scaled, A_data_sub, min_events=10)
             if loss_mmd is None:
                 return {
                     "loss": None,
                     "loss_mmd": None,
-                    "loss_id": None,
+                    "moment_loss": None,
                     "skip": True
                 }
 
@@ -481,12 +478,10 @@ def train_step(
     std_data_sub  = A_data_sub.std(0, unbiased=False)
 
     mean_loss = (mu_corr   - mu_data_sub ).pow(2).mean()
-    # tested: using (std_corr  - std_data_sub).pow(2).mean() shrinks the distribution (effect of few events in data_sub)
     logstd_loss = (torch.log(std_corr) - torch.log(std_data_sub)).pow(2).mean() 
     moment_loss = mean_loss + logstd_loss
-    rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
-    
-    total_loss = loss_mmd 
+    #rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
+    total_loss = loss_mmd + lambda_mom * moment_loss
     
     # --- backward ---
     optimizer.zero_grad()
@@ -496,11 +491,11 @@ def train_step(
     return {
         "loss": total_loss.item(),
         "loss_mmd": loss_mmd.item(),
-        "loss_id": id_loss.item(),
+        "moment_loss": moment_loss.item(),
         "skip": False
     }
 
-def compute_val_mmd(flow, context_encoder, val_case, n_events, sigma_mmd=1.0):
+def compute_val_mmd(flow, context_encoder, val_case, n_events):
 
     # Subsampling uniforme sulla distribuzione di validazione
     A_sim  = subsample_dynamic(val_case["A_sim"],  n_events)
@@ -525,7 +520,7 @@ class SimulationCorrection():
     def __init__(self, configuration, dataset,standardize,
                  encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
                  flow_n_layers, flow_hidden_dim, flow_context_dim,
-                 initial_lr, batch_size, sigma_mmd, lambda_id):
+                 initial_lr, batch_size, lambda_mom):
 
         # Name of the variables used as conditions and during training
         self.dataset = dataset
@@ -549,8 +544,7 @@ class SimulationCorrection():
         # general training hyperparameters
         self.initial_lr       = initial_lr
         self.batch_size       = batch_size
-        self.sigma_mmd        = sigma_mmd
-        self.lambda_id        = lambda_id
+        self.lambda_mom        = lambda_mom
 
         # Now, lets open a directory to store the results and models of a given configuration
         self.configuration =  configuration
@@ -604,28 +598,17 @@ class SimulationCorrection():
         best_val_mmd = float("inf")
         best_step = 0
         # --- Ottimizzazione del training: ---
-        #
-        # sigma_mmd ≈ RMS delle distanze in A_sim
-        # Troppo piccolo → overfitting locale
-
-        # Troppo grande → perde struttura
-        sigma_mmd = 1
-        # lambda_id 
-        # 0.01 → molto permissivo
-        # 0.1  → buon default
-	# 1.0  → molto conservativo
-        lambda_id=1.0
         
         for step, batch in enumerate(loader):
 
-            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_id=self.lambda_id, sigma_mmd=self.sigma_mmd,test_identity=test_identity,device=self.device)
+            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_mom=self.lambda_mom,test_identity=test_identity,device=self.device)
             if losses.get("skip", False):
                 continue
             if step % 100 == 0:
                 print(
                     f"step {step:5d} | "
                     f"MMD {losses['loss_mmd']:.4f} | "
-                    f"ID {losses['loss_id']:.4f}"
+                    f"MOMENT {losses['moment_loss']:.4f}"
                 )
             # if step == 100:
             #     with torch.no_grad():
@@ -639,7 +622,7 @@ class SimulationCorrection():
             # ---- qui l'implementazione dell'Early Stopping --- 
             if step % val_every == 0 and step > 0:
 
-                val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size, sigma_mmd=self.sigma_mmd)
+                val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size)
          
                 print(f"  → Validation MMD = {val_mmd:.4f}")
          
@@ -655,8 +638,7 @@ class SimulationCorrection():
                         "context_config": self.context_encoder.get_config(),
                         "best_step": step,
                         "best_val_mmd": best_val_mmd,
-                        "sigma_mmd": self.sigma_mmd,
-                        "lambda_id": self.lambda_id
+                        "lambda_mom": self.lambda_mom
                     }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
          
                     print(f"  ✓ new best model at step {step}")
@@ -774,7 +756,7 @@ def generate_alternating_masks(dim, n_layers):
 # A_corr: output del flow (N_events, N_features)
 # Assicurati che siano tutti float32 e sullo stesso device
 
-def print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mean_sim,std_sim):
+def print_numeric_validation(A_sim,A_data,A_corr):
     # Trasforma eventuali batch in (N, D)
     if A_sim.ndim == 3:
         A_sim = A_sim.squeeze(0)
@@ -784,8 +766,8 @@ def print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mea
         A_corr = A_corr.squeeze(0)
 
 
-    mean_sim_scaled = A_sim.mean(0)
-    std_sim_scaled  = A_sim.std(0)
+    mean_sim = A_sim.mean(0)
+    std_sim  = A_sim.std(0)
 
     mean_corr = A_corr.mean(0)
     std_corr  = A_corr.std(0)
@@ -794,25 +776,21 @@ def print_numeric_validation(A_sim,A_data,A_corr,A_data_scaled,A_corr_scaled,mea
     std_data  = A_data.std(0)
 
     mmd = mmd_loss(A_corr, A_data)
-    mmd_scaled = mmd_loss(A_corr_scaled, A_data_scaled)
-    print("MMD in scaled space:", mmd_scaled.item())
-    print("means:", A_corr_scaled.mean().item(), A_data_scaled.mean().item())
-    print("stds :", A_corr_scaled.std().item(),  A_data_scaled.std().item())
+    print("MMD in scaled space:", mmd.item())
+    print("means:", A_corr.mean().item(), A_data.mean().item())
+    print("stds :", A_corr.std().item(),  A_data.std().item())
     
     ks = scipy.stats.ks_2samp(
         A_corr.cpu().numpy().ravel(),
         A_data.cpu().numpy().ravel()
     ).statistic
     
-    print("Feature-wise mean:")
-    
-    print("sim (scaled)  :", mean_sim_scaled)
+    print("Feature-wise mean (scaled):")
     print("sim  :", mean_sim)
     print("corr :", mean_corr)
     print("data :", mean_data)
 
-    print("\nFeature-wise std:")
-    print("sim (scaled)  :", std_sim_scaled)
+    print("\nFeature-wise std (scaled):")
     print("sim  :", std_sim)
     print("corr :", std_corr)
     print("data :", std_data)
@@ -825,5 +803,5 @@ def standardize_dataset(A):
     mean  = A.mean(0)
     std   = A.std(0) + 1e-8
     print(f"validation standardization: mean = {mean}, std = {std}")
-    A_scaled = (A - mean) / std
-    return (A_scaled,mean,std)
+    A = (A - mean) / std
+    return (A,mean,std)
