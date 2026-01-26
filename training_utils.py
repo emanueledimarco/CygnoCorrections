@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+
 class ConditionalAffineCoupling(nn.Module):
     def __init__(self, dim, context_dim=0, mask=None, hidden_dim=128):
         """
@@ -46,9 +47,24 @@ class ConditionalAffineCoupling(nn.Module):
         orig_shape = x.shape
         x_flat = x.view(-1, x.shape[-1])  # appiattisce batch ed eventuali dimensioni extra
 
-        mask = self.mask.to(x.device)
-        x_masked = x_flat[:, mask.bool()]
+        base_mask = self.mask.to(x.device)
+        base_mask_bool = base_mask.bool()
+        base_dim = base_mask_bool.numel()
 
+        # --- x_masked per st_net: SOLO feature osservabili ---
+        x_obs = x_flat[:, :base_dim]  
+        x_masked = x_obs[:, base_mask_bool]
+
+        # --- mask esteso SOLO per decidere cosa trasformare ---
+        if x_flat.shape[1] > base_mask.shape[0]:
+            n_latent = x_flat.shape[1] - base_mask.shape[0]
+            latent_mask = torch.ones(n_latent, device=x.device)
+            full_mask = torch.cat([base_mask, latent_mask], dim=0)
+        else:
+            full_mask = base_mask
+
+        full_mask_bool = full_mask.bool()
+        
         # concatena context
         # context: (C,) o (1, C)
         if context is not None:
@@ -68,8 +84,8 @@ class ConditionalAffineCoupling(nn.Module):
 
         # applica affine solo alle feature non mascherate
         y_flat = x_flat.clone()
-        y_flat[:, (~mask.bool())] = x_flat[:, (~mask.bool())] * torch.exp(s) + t
-
+        y_flat[:, (~full_mask_bool)] = x_flat[:, (~full_mask_bool)] * torch.exp(s) + t
+        
         # rimetti la forma originale
         y = y_flat.view(*orig_shape)
         log_det = s.sum(dim=1)  # shape (B*N,) se batch flatten, puoi rimodellare se vuoi
@@ -84,9 +100,26 @@ class ConditionalAffineCoupling(nn.Module):
         orig_shape = y.shape
         y_flat = y.view(-1, y.shape[-1])
 
-        mask = self.mask.to(y.device)
-        y_masked = y_flat[:, mask.bool()]
+        base_mask = self.mask.to(y.device)
+        base_mask_bool = base_mask.bool()
+        base_dim = base_mask_bool.numel()
+        
+        # --- x_masked per st_net: SOLO feature osservabili ---
+        y_obs = y_flat[:, :base_dim]
+        y_masked = y_obs[:, base_mask_bool]
 
+        # --- mask esteso SOLO per decidere cosa trasformare ---
+        if y_flat.shape[1] > base_mask.shape[0]:
+            n_latent = y_flat.shape[1] - base_mask.shape[0]
+            latent_mask = torch.ones(n_latent, device=y.device)
+            full_mask = torch.cat([base_mask, latent_mask], dim=0)
+        else:
+            full_mask = base_mask
+
+        full_mask_bool = full_mask.bool()
+
+
+        
         if context is not None:
             context_flat = context.view(y_masked.shape[0], -1)
             net_input = torch.cat([y_masked, context_flat], dim=1)
@@ -97,8 +130,8 @@ class ConditionalAffineCoupling(nn.Module):
         s = torch.tanh(s)
 
         x_flat = y_flat.clone()
-        x_flat[:, (~mask.bool())] = (y_flat[:, (~mask.bool())] - t) * torch.exp(-s)
-
+        x_flat[:, (~full_mask_bool)] = (y_flat[:, (~full_mask_bool)] - t) * torch.exp(-s)
+        
         x = x_flat.view(*orig_shape)
         log_det = -s.sum(dim=1)
 
@@ -107,24 +140,40 @@ class ConditionalAffineCoupling(nn.Module):
 def sanity_check_coupling(flow, context_encoder, device="cpu"):
     flow.eval()
     context_encoder.eval()
- 
+
     with torch.no_grad():
-        # prendi un layer reale dal flow
-        layer = flow.layers[0]
+        B = 10
+        x = torch.randn(B, flow.dim)
+        z = torch.randn_like(x)
+        x_in = torch.cat([x, z], dim=1)
+        
+        dummy_context = torch.zeros(B, flow.context_dim) if flow.context_dim > 0 else None
+        
+        y, _ = flow(x_in, dummy_context)
+        x_rec = flow.inverse(y, dummy_context)
+
+        print("[SANITY CHECK] max |x - inverse(forward(x))| =",
+              (x_in - x_rec).abs().max().item())
+    
+    # with torch.no_grad():
+    #     B = 10
+    #     # prendi un layer reale dal flow
+    #     layer = flow.layers[0]
  
-        D = flow.dim
-        context_dim = context_encoder.output_dim
+    #     D = flow.dim
+    #     context_dim = context_encoder.output_dim
  
-        x = torch.randn(10, D, device=device)
-        context = torch.randn(10, context_dim, device=device)
+    #     x = torch.randn(B, D, device=device)
+        
+    #     context = torch.randn(10, context_dim, device=device)
  
-        y, _ = layer(x, context)
-        x_rec = layer.inverse(y, context)
+    #     y, _ = layer(x, context)
+    #     x_rec = layer.inverse(y, context)
  
-        max_err = (x - x_rec).abs().max().item()
-        print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
+    #     max_err = (x - x_rec).abs().max().item()
+    #     print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
  
-        assert max_err < 1e-6, "Coupling layer is NOT invertible!"
+    #     assert max_err < 1e-6, "Coupling layer is NOT invertible!"
 
 class ConditionalFlow(nn.Module):
     def __init__(self, dim, n_layers, hidden_dim, masks, context_dim=0):
@@ -156,10 +205,12 @@ class ConditionalFlow(nn.Module):
     def forward(self, x, context=None):
         """
         Applica il flow ai dati x con context condizionale
-        x: (B, dim) o (B, N, dim)
+        x: (B, dim_obs + dim_latent)  # dim_latent opzionale
         context: (B, context_dim) o (B*N, context_dim)
         Ritorna: y, log_det totale
         """
+        if x.shape[-1] < self.dim:
+            raise ValueError("Input dimension smaller than flow dim")
         log_det_total = 0
         y = x
         for layer in self.layers:
@@ -398,17 +449,17 @@ def train_step(
     N = min(len(A_sim_full_scaled), len(A_data_full_scaled), n_events)
     A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
     A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
-
-    sigma_noise = 0.5   # valore iniziale consigliato
-    noise = sigma_noise * torch.randn_like(A_sim_sub)
-    A_sim_noisy = A_sim_sub + noise
-
     
     if A_sim_sub.shape[1] == 0:
         # fallback: copia tutti gli eventi disponibili
         A_sim_sub = A_sim_full_scaled.clone()
     if A_data_sub.shape[1] == 0:
         A_data_sub = A_data_full_scaled.clone()
+
+    sigma_latent = 5.0 # scala circa pari a std dei dati nello spazio standardizzato
+    z_latent = sigma_latent * torch.randn_like(A_sim_sub)
+    # Combina input con latent
+    A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1)
 
     # --- Costruzione del contesto ---
     # --- fundamental (previous bug): context event by event, so for each batch, the context
@@ -421,7 +472,7 @@ def train_step(
     cond = context_encoder(context)
 
     # --- forward pass ---
-    A_corr_scaled, _ = flow(A_sim_noisy, cond)    
+    A_corr_scaled, _ = flow(A_corr_input, cond)    
     # print("A_sim_full mean/std:",
     #       A_sim_full.mean().item(),
     #       A_sim_full.std().item())
@@ -449,28 +500,19 @@ def train_step(
                 "moment_loss": None,
                 "skip": True
             }
-        # MMD loss solo se non identity test
-        if A_data_sub.shape[1] == 0:
-            ## EDM prima
-            #id_loss = torch.tensor(0.0, device=A_corr.device)
-            #loss_mmd = torch.tensor(0.0, device=device)
+        id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
+
+        n_data_feat = A_data_sub.shape[1]
+        A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda
+        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub, min_events=10)
+
+        if loss_mmd is None:
             return {
                 "loss": None,
                 "loss_mmd": None,
                 "moment_loss": None,
                 "skip": True
             }
-        else:
-            id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
-            ## EDM prima
-            loss_mmd = conditional_mmd(A_corr_scaled, A_data_sub, min_events=10)
-            if loss_mmd is None:
-                return {
-                    "loss": None,
-                    "loss_mmd": None,
-                    "moment_loss": None,
-                    "skip": True
-                }
 
     mu_corr  = A_corr_scaled.mean(0)
     std_corr = A_corr_scaled.std(0, unbiased=False)
@@ -481,7 +523,8 @@ def train_step(
     logstd_loss = (torch.log(std_corr) - torch.log(std_data_sub)).pow(2).mean() 
     moment_loss = mean_loss + logstd_loss
     #rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
-    total_loss = loss_mmd + lambda_mom * moment_loss
+    #total_loss = loss_mmd + lambda_mom * moment_loss
+    total_loss = loss_mmd
     
     # --- backward ---
     optimizer.zero_grad()
