@@ -137,7 +137,7 @@ if __name__ == "__main__":
         # general training parameters
         initial_lr = dictionary[conf]["initial_lr"]
         batch_size = dictionary[conf]["batch_size"]
-        lambda_mom = dictionary[conf]["lambda_mom"]
+        lambda_mom = float(dictionary[conf]["lambda_mom"])
 
         # build the flow and train it
         corrections = SimulationCorrection(str(conf),dataset,standardize,

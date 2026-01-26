@@ -445,7 +445,6 @@ def train_step(
         print(f"After standardization  A_data_full (scaled): mu={A_data_full_scaled.mean(0)},std={A_data_full_scaled.std(0)}")
         
     # subsampling coerente dei dataset in batch di n_events ciascuno
-    #N = min(n_events, A_sim_full.shape[0], A_data_full.shape[0]) ## EDM prima
     N = min(len(A_sim_full_scaled), len(A_data_full_scaled), n_events)
     A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
     A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
@@ -520,11 +519,11 @@ def train_step(
     std_data_sub  = A_data_sub.std(0, unbiased=False)
 
     mean_loss = (mu_corr   - mu_data_sub ).pow(2).mean()
-    logstd_loss = (torch.log(std_corr) - torch.log(std_data_sub)).pow(2).mean() 
+    logstd_loss = (torch.log(std_corr + 1e-8) - torch.log(std_data_sub + 1e-8)).pow(2).mean() 
     moment_loss = mean_loss + logstd_loss
     #rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
-    #total_loss = loss_mmd + lambda_mom * moment_loss
-    total_loss = loss_mmd
+    total_loss = loss_mmd + lambda_mom * moment_loss
+    #total_loss = loss_mmd
     
     # --- backward ---
     optimizer.zero_grad()
