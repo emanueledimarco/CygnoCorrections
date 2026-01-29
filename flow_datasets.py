@@ -109,6 +109,10 @@ def build_val_case(
     return {
         "A_sim": A_sim,
         "A_data": A_data,
+        "sim_mu": A_sim.mean(dim=0),
+        "sim_std": A_sim.std(dim=0),
+        "data_mu": A_data.mean(dim=0),
+        "data_std": A_data.std(dim=0),
         "context": context
     }
 
