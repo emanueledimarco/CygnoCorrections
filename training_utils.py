@@ -459,7 +459,7 @@ def train_step(
     if A_data_sub.shape[1] == 0:
         A_data_sub = A_data_full_scaled.clone()
 
-    sigma_latent = 1.0 # scala circa pari a std dei dati nello spazio standardizzato
+    sigma_latent = 1 # scala circa pari a std dei dati nello spazio standardizzato
     z_latent = sigma_latent * torch.randn_like(A_sim_sub)
     # Combina input con latent
     # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
@@ -508,8 +508,10 @@ def train_step(
 
         n_data_feat = A_data_sub.shape[1]
         # A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda nella versione "in coda"
-        A_corr_for_mmd = A_corr_scaled # nella versione "latent perturba le variabili direttamente"
-        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub)
+        # align MMD with data
+        A_corr_for_mmd = A_corr_scaled - mu_data.detach() # nella versione "latent perturba le variabili direttamente"
+        A_data_sub_mmd = A_data_sub    - mu_data.detach()
+        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub_mmd)
 
         if loss_mmd is None:
             return {
@@ -521,14 +523,14 @@ def train_step(
 
 
     # --- Calcolo dei termini della loss ---
-    moment_loss = compute_moment_loss(A_corr_for_mmd,A_data_sub)
-    logstd_loss_val = compute_logstd_loss(A_corr_for_mmd,A_data_sub)
-    var_floor_loss_val = compute_var_floor_loss(A_corr_for_mmd,A_data_sub)
-    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_for_mmd,A_data_sub)
+    moment_loss = compute_moment_loss(A_corr_scaled,A_data_sub)
+    logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_sub)
+    var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_sub)
+    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
     
-    lambda_logstd = 0.1
-    lambda_var = 0.05
-    lambda_mean_anchor = 0.1
+    lambda_logstd = 0.0
+    lambda_var = 0.1
+    lambda_mean_anchor = 0.2
 
     if step==0:
         print(f"Training lambdas: mom={lambda_mom}, logstd={lambda_logstd}, var={lambda_var}, mean_anchor={lambda_mean_anchor}")
@@ -588,7 +590,7 @@ def compute_logstd_loss(A_corr, A_data):
     logstd_loss = (torch.log(std_corr + 1e-6) - torch.log(std_data + 1e-6)).pow(2).mean() 
     return logstd_loss
 
-def compute_var_floor_loss(A_corr, A_data, floor_val=0.8):
+def compute_var_floor_loss(A_corr, A_data, floor_val=1.0):
     # centra A_corr sulla media dei dati (STOP GRAD sulla media dati)
     mu_data = A_data.mean(0)
     std_data = A_data.std(0, unbiased=False)
@@ -625,7 +627,7 @@ def compute_val_mmd(flow, context_encoder, val_case, n_events):
     return loss
 
 @torch.no_grad()
-def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom=0.001, lambda_logstd=0.1, lambda_var=0.05,lambda_mean_anchor=0.1):
+def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom=1e-4, lambda_logstd=0.0, lambda_var=0.1,lambda_mean_anchor=0.2,sigma_latent=1):
     # Subsampling uniforme sulla distribuzione di validazione
     A_sim  = subsample_dynamic(val_case["A_sim"],  n_events)
     A_data = subsample_dynamic(val_case["A_data"], n_events)
@@ -644,43 +646,58 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
     # Passaggio attraverso il flow
     context = val_case["context"].repeat(len(A_sim), 1)
     cond = context_encoder(context)
-    A_corr_scaled, _ = flow(A_sim_scaled, cond)
-    
-    # --- Calcolo dei termini della loss ---
-    loss_mmd = conditional_mmd(A_corr_scaled, A_data_scaled)
-    moment_loss = compute_moment_loss(A_corr_scaled,A_data_scaled)
-    logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_scaled)
-    var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_scaled)
-    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_scaled)
+
+    # media su K ~ 10 z latent noises (to avoid to pick a fluc of the latent noise)
+    val_losses = {
+        "loss_mmd": [],
+        "moment_loss": [],
+        "logstd_loss": [],
+        "var_floor_loss": [],
+        "mean_anchor_loss": []
+    }
+        
+    K=10    # K = 5 o 10
+    for k in range(K):
+        z_latent = torch.randn_like(A_sim_scaled) * sigma_latent
+        A_corr_input, _ = flow(A_sim_scaled + z_latent, cond)
+        # --- Calcolo dei termini della loss ---
+        val_losses["loss_mmd"].append(conditional_mmd(A_corr_input, A_data_scaled) )
+        val_losses["moment_loss"].append(compute_moment_loss(A_corr_input,A_data_scaled) )
+        val_losses["logstd_loss"].append(compute_logstd_loss(A_corr_input,A_data_scaled) )
+        val_losses["var_floor_loss"].append(compute_var_floor_loss(A_corr_input,A_data_scaled) )
+        val_losses["mean_anchor_loss"].append(compute_mean_anchor_loss(A_corr_input,A_data_scaled) )
+
+    for k,loss in val_losses.items():
+        val_losses[k] = torch.stack(val_losses[k]).mean()
 
     print(f"Validation lambdas: mom={lambda_mom}, logstd={lambda_logstd}, var={lambda_var}, mean_anchor={lambda_mean_anchor}")
     
     # Total loss combinata
     total_loss = (
-        loss_mmd
-        + lambda_mom * moment_loss
-        + lambda_logstd * logstd_loss_val
-        + lambda_var * var_floor_loss_val
-        + lambda_mean_anchor * mean_anchor_loss_val
+        val_losses["loss_mmd"]
+        + lambda_mom * val_losses["moment_loss"]
+        + lambda_logstd * val_losses["logstd_loss"]
+        + lambda_var * val_losses["var_floor_loss"]
+        + lambda_mean_anchor * val_losses["mean_anchor_loss"]
     )
     
     print(
         f"Validation step | "
-        f"MMD {loss_mmd.item():.4f} | "
-        f"MOMENT {moment_loss.item():.4f} | "
-        f"LOGSTD {logstd_loss_val.item():.4f} | "
-        f"VARFLOOR {var_floor_loss_val.item():.4f} | "
-        f"MEANANCHOR {mean_anchor_loss_val.item():.4f} | "
+        f"MMD {val_losses['loss_mmd'].item():.4f} | "
+        f"MOMENT {val_losses['moment_loss'].item():.4f} | "
+        f"LOGSTD {val_losses['logstd_loss'].item():.4f} | "
+        f"VARFLOOR {val_losses['var_floor_loss'].item():.4f} | "
+        f"MEANANCHOR {val_losses['mean_anchor_loss'].item():.4f} | "
         f"TOTAL {total_loss.item():.4f} "
     )
 
     return {
         "total_loss": total_loss.item(),
-        "loss_mmd": loss_mmd.item(),
-        "moment_loss": moment_loss.item(),
-        "logstd_loss": logstd_loss_val.item(),
-        "var_floor_loss": var_floor_loss_val.item(),
-        "mean_anchor_loss": mean_anchor_loss_val.item()
+        "loss_mmd": val_losses["loss_mmd"].item(),
+        "moment_loss": val_losses["moment_loss"].item(),
+        "logstd_loss": val_losses["logstd_loss"].item(),
+        "var_floor_loss": val_losses["var_floor_loss"].item(),
+        "mean_anchor_loss": val_losses["mean_anchor_loss"].item()
     }
 
 class SimulationCorrection():
