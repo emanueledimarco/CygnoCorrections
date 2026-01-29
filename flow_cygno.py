@@ -195,9 +195,16 @@ if __name__ == "__main__":
         A_data_df = target_data[tgt_key_0]
         A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
         A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
+        sigma_latent = 1.0
         if standardize:
             A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
             A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
+            z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
+            A_sim_scaled = A_sim_scaled + z_latent
+        else:
+            z_latent = sigma_latent * torch.randn_like(A_sim)
+            A_sim = A_sim + z_latent
+
         
         # --- APPLICA FLOW PER LA VALIDAZIONE --- #
         print ("EVALUATE FLOW")
@@ -214,6 +221,7 @@ if __name__ == "__main__":
         perm = torch.randperm(A_sim_scaled.shape[0])
         A_sim_scaled_perm = A_sim_scaled[perm]
 
+        
         with torch.no_grad():
             cond = context_encoder(context_rep)
             A_corr_scaled, _ = flow(A_sim_scaled, cond)

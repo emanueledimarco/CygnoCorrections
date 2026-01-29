@@ -455,11 +455,14 @@ def train_step(
     if A_data_sub.shape[1] == 0:
         A_data_sub = A_data_full_scaled.clone()
 
-    sigma_latent = 5.0 # scala circa pari a std dei dati nello spazio standardizzato
+    sigma_latent = 1.0 # scala circa pari a std dei dati nello spazio standardizzato
     z_latent = sigma_latent * torch.randn_like(A_sim_sub)
     # Combina input con latent
-    A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1)
+    # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
+    A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
+    
 
+    
     # --- Costruzione del contesto ---
     # --- fundamental (previous bug): context event by event, so for each batch, the context
     #     (alpha,beta,x,y) is always the same
@@ -502,8 +505,9 @@ def train_step(
         id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
 
         n_data_feat = A_data_sub.shape[1]
-        A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda
-        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub, min_events=10)
+        # A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda nella versione "in coda"
+        A_corr_for_mmd = A_corr_scaled # nella versione "latent perturba le variabili direttamente"
+        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub)
 
         if loss_mmd is None:
             return {
@@ -513,18 +517,24 @@ def train_step(
                 "skip": True
             }
 
-    mu_corr  = A_corr_scaled.mean(0)
-    std_corr = A_corr_scaled.std(0, unbiased=False)
-    mu_data_sub = A_data_sub.mean(0)
-    std_data_sub  = A_data_sub.std(0, unbiased=False)
 
-    mean_loss = (mu_corr   - mu_data_sub ).pow(2).mean()
-    logstd_loss = (torch.log(std_corr + 1e-8) - torch.log(std_data_sub + 1e-8)).pow(2).mean() 
-    moment_loss = mean_loss + logstd_loss
-    #rms_loss = (torch.log(std_corr / std_data_sub)).pow(2)
-    total_loss = loss_mmd + lambda_mom * moment_loss
-    #total_loss = loss_mmd
+    # --- Calcolo dei termini della loss ---
+    moment_loss = compute_moment_loss(A_corr_for_mmd,A_data_sub)
+    logstd_loss_val = compute_logstd_loss(A_corr_for_mmd,A_data_sub)
+    var_floor_loss_val = compute_var_floor_loss(A_corr_for_mmd,A_data_sub)
+    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_for_mmd,A_data_sub)
     
+    lambda_logstd = 0.1
+    lambda_var = 0.05
+    lambda_mean_anchor = 1.0
+    
+    # Total loss combinata
+    total_loss = loss_mmd
+    + lambda_mom * moment_loss
+    + lambda_logstd * logstd_loss_val
+    + lambda_var * var_floor_loss_val
+    + lambda_mean_anchor * mean_anchor_loss_val
+
     # --- backward ---
     optimizer.zero_grad()
     total_loss.backward()
@@ -534,8 +544,48 @@ def train_step(
         "loss": total_loss.item(),
         "loss_mmd": loss_mmd.item(),
         "moment_loss": moment_loss.item(),
+        "logstd_loss": logstd_loss_val.item(),
+        "var_floor_loss": var_floor_loss_val.item(),
+        "mean_anchor_loss": mean_anchor_loss_val.item(),
         "skip": False
     }
+
+
+def compute_moment_loss(A_corr, A_data, weight_std=0.1):
+    mu_corr = A_corr.mean(0)
+    mu_data = A_data.mean(0)
+    mean_loss = (mu_corr   - mu_data).pow(2).mean()
+    
+    std_corr = A_corr.std(0, unbiased=False)
+    std_data = A_data.std(0, unbiased=False)
+    logstd_loss = (torch.log(std_corr + 1e-6) - torch.log(std_data + 1e-6)).pow(2).mean() 
+    
+    return mean_loss + weight_std * logstd_loss 
+
+def compute_logstd_loss(A_corr, A_data):
+    std_corr = A_corr.std(0, unbiased=False)
+    std_data = A_data.std(0, unbiased=False)
+    logstd_loss = (torch.log(std_corr + 1e-6) - torch.log(std_data + 1e-6)).pow(2).mean() 
+    return logstd_loss
+
+def compute_var_floor_loss(A_corr, A_data, floor_val=0.8):
+    # centra A_corr sulla media dei dati (STOP GRAD sulla media dati)
+    mu_data = A_data.mean(0)
+    std_data = A_data.std(0, unbiased=False)
+    A_corr_centered = A_corr - mu_data.detach()
+    std_corr_centered = A_corr_centered.std(0, unbiased=False)
+    std_floor = floor_val * std_data.detach()
+    var_floor_loss = torch.relu(std_floor - std_corr_centered).pow(2).mean()    
+    return var_floor_loss
+
+def compute_mean_anchor_loss(A_corr, A_data):
+    mu_corr = A_corr.mean(0)
+    mu_data = A_data.mean(0)
+    mean_anchor_loss = (mu_corr - mu_data.detach()).pow(2).mean()
+    return mean_anchor_loss
+
+def standardize(x, mu, std):
+    return (x - mu) / std
 
 def compute_val_mmd(flow, context_encoder, val_case, n_events):
 
@@ -554,8 +604,39 @@ def compute_val_mmd(flow, context_encoder, val_case, n_events):
     loss = mmd_loss(A_corr, A_data)
     return loss
 
-def standardize(x, mu, std):
-    return (x - mu) / std
+@torch.no_grad()
+def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom=0.001, lambda_logstd=0.1, lambda_var=0.05,lambda_mean_anchor=1.0):
+    # Subsampling uniforme sulla distribuzione di validazione
+    A_sim  = subsample_dynamic(val_case["A_sim"],  n_events)
+    A_data = subsample_dynamic(val_case["A_data"], n_events)
+
+    # Passaggio attraverso il flow
+    context = val_case["context"].repeat(len(A_sim), 1)
+    cond = context_encoder(context)
+    A_corr, _ = flow(A_sim, cond)
+    
+    # --- Calcolo dei termini della loss ---
+    loss_mmd = conditional_mmd(A_corr, A_data)
+    moment_loss = compute_moment_loss(A_corr,A_data)
+    logstd_loss_val = compute_logstd_loss(A_corr,A_data)
+    var_floor_loss_val = compute_var_floor_loss(A_corr,A_data)
+    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr,A_data)
+
+    # Total loss combinata
+    total_loss = loss_mmd
+    + lambda_mom * moment_loss
+    + lambda_logstd * logstd_loss_val
+    + lambda_var * var_floor_loss_val
+    + lambda_mean_anchor * mean_anchor_loss_val
+
+    return {
+        "total_loss": total_loss.item(),
+        "loss_mmd": loss_mmd.item(),
+        "moment_loss": moment_loss.item(),
+        "logstd_loss": logstd_loss_val.item(),
+        "var_floor_loss": var_floor_loss_val.item(),
+        "mean_anchor_loss": mean_anchor_loss_val.item()
+    }
 
 class SimulationCorrection():
 
@@ -637,7 +718,7 @@ class SimulationCorrection():
         val_every  = 200     # ogni 200 step
         patience   = 800     # ~4 validazioni senza migliorare
         min_delta  = 0.005   # soglia reale (rumore MMD)
-        best_val_mmd = float("inf")
+        best_val_total_loss = float("inf")
         best_step = 0
         # --- Ottimizzazione del training: ---
         
@@ -650,47 +731,82 @@ class SimulationCorrection():
                 print(
                     f"step {step:5d} | "
                     f"MMD {losses['loss_mmd']:.4f} | "
-                    f"MOMENT {losses['moment_loss']:.4f}"
+                    f"MOMENT {losses['moment_loss']:.4f} | "
+                    f"LOGSTD {losses['logstd_loss']:.4f} | "
+                    f"VARFLOOR {losses['var_floor_loss']:.4f} | "
+                    f"MEANANCHOR {losses['mean_anchor_loss']:.4f} | "
+                    f"TOTAL {losses['loss']:.4f} "
                 )
-            # if step == 100:
-            #     with torch.no_grad():
-            #         ### sto qua
-            #         #A_corr1 = flow(A_sim_sub, cond1)
-            #         #A_corr2 = flow(A_sim_sub, cond2)
-
-            #         print("Δ corr:", torch.mean(torch.abs(A_corr1 - A_corr2)))
                 
             # ---- VALIDAZIONE PERIODICA ----
-            # ---- qui l'implementazione dell'Early Stopping --- 
+            # ---- qui l'implementazione dell'Early Stopping ---
             if step % val_every == 0 and step > 0:
-
-                val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size)
-         
-                print(f"  → Validation MMD = {val_mmd:.4f}")
-         
-                if val_mmd < best_val_mmd - min_delta:
-                    best_val_mmd = val_mmd
+                val_losses = compute_val_total_loss(
+                    self.flow,
+                    self.context_encoder,
+                    self.val_case,
+                    self.batch_size,
+                )
+                val_total_loss = val_losses["total_loss"]
+                
+                print(f"  → Validation total loss = {val_total_loss:.4f} "
+                      f"(MMD {val_losses['loss_mmd']:.4f}, "
+                      f"MOMENT {val_losses['moment_loss']:.4f})")
+                
+                if val_total_loss < best_val_total_loss - min_delta:
+                    best_val_total_loss = val_total_loss
                     best_step = step
-
-                    # Save the output
+                
+                    # Salva lo stato migliore
                     torch.save({
                         "flow_state": self.flow.state_dict(),
                         "context_state": self.context_encoder.state_dict(),
                         "flow_config": self.flow.get_config(),
                         "context_config": self.context_encoder.get_config(),
                         "best_step": step,
-                        "best_val_mmd": best_val_mmd,
+                        "best_val_total_loss": best_val_total_loss,
                         "lambda_mom": self.lambda_mom
                     }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
-         
-                    print(f"  ✓ new best model at step {step}")
-         
+                
+                    print(f"  ✓ new best model at step {step} (val total loss {val_total_loss:.4f})")
+                
                 elif step - best_step > patience:
                     print(
                         f"Early stopping at step {step} "
-                        f"(best step {best_step}, val MMD {best_val_mmd:.4f})"
+                        f"(best step {best_step}, val total loss {best_val_total_loss:.4f})"
                     )
                     break
+            
+            
+            # if step % val_every == 0 and step > 0:
+
+            #     val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size)
+         
+            #     print(f"  → Validation MMD = {val_mmd:.4f}")
+         
+            #     if val_mmd < best_val_mmd - min_delta:
+            #         best_val_mmd = val_mmd
+            #         best_step = step
+
+            #         # Save the output
+            #         torch.save({
+            #             "flow_state": self.flow.state_dict(),
+            #             "context_state": self.context_encoder.state_dict(),
+            #             "flow_config": self.flow.get_config(),
+            #             "context_config": self.context_encoder.get_config(),
+            #             "best_step": step,
+            #             "best_val_mmd": best_val_mmd,
+            #             "lambda_mom": self.lambda_mom
+            #         }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
+         
+            #         print(f"  ✓ new best model at step {step}")
+         
+            #     elif step - best_step > patience:
+            #         print(
+            #             f"Early stopping at step {step} "
+            #             f"(best step {best_step}, val MMD {best_val_mmd:.4f})"
+            #         )
+            #         break
                    
 def load_model(
     checkpoint_path,
