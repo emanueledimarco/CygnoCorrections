@@ -23,6 +23,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--train",action="store_true",help="Run the training step")
     parser.add_argument("--validate",action="store_true",help="Run the validation step")
+    parser.add_argument("--matrix",action="store_true",help="Run the matrix validation step (to cover all the Sim x Data conditions")
     parser.add_argument("--configuration",type=str,default="configuration_2026_lime_v1",help="Key of the configuration in the flow yaml configuration file")
     parser.add_argument("--usecache",action="store_true",help="use cached source and target datasets in cache/ dir instead of re-reading from ROOT")
     parser.add_argument("--atomictest",action="store_true",help="Do basic identity test on the training (DEBUG)")
@@ -254,9 +255,9 @@ if __name__ == "__main__":
 
         import matplotlib.pyplot as plt
         #plt.ion()
-        plt.hist(A_sim.cpu(), bins=50, density=True, alpha=0.4, label="sim")
-        plt.hist(A_data.cpu(), bins=50, density=True, alpha=0.4, label="data")
-        plt.hist(A_corr.cpu(), bins=50, density=True, alpha=0.4, label="corr")
+        plt.hist(A_sim.cpu(), bins=30, density=True, alpha=0.4, label="sim")
+        plt.hist(A_data.cpu(), bins=30, density=True, alpha=0.4, label="data")
+        plt.hist(A_corr.cpu(), bins=30, density=True, alpha=0.4, label="corr")
         plt.legend()
         plt.savefig("basic_test.pdf")
         plt.show(block=False)
@@ -264,7 +265,7 @@ if __name__ == "__main__":
         
         # --- CREAZIONE VALIDATOR --- #
         path_to_plots = "./plot/validation_plots/"
-        plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df)
+        plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=dictionary["data_inputs"], doratio=False)
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
         output_root = "validation_output.root"
@@ -275,7 +276,80 @@ if __name__ == "__main__":
 
         print(f"ROOT validation file written to: {path_to_plots}/{output_root}")
         
+
+    # ---  MATRIX VALIDATION --- #
+    elif args.matrix:
+
+        # --- CONFIG --- #
+        checkpoint_path = os.getcwd() + "/results/" + str(conf) + "/saved_states/best_model.pt"
+        device = "cpu"
+
+        # --- CARICAMENTO MODELLI --- #
+        flow, context_encoder, meta = load_model(checkpoint_path, device=device)
+        print("Modello caricato!")
+        print("Step migliore:", meta.get("best_step"))
+        print("Val MMD:", meta.get("best_val_mmd"))
+
+        for sim_k in source_data.keys():
+            Z,Alpha,Lambda = sim_k
+            for data_k in target_data.keys():
+                _,P,T = data_k
+
+                src_key_0 = (Z,Alpha,Lambda)
+                tgt_key_0 = (Z,P,T)
+
+                # the Z is taken from sim, but it can be that the corresponding key in data is absent (not processed, not taken, etc)
+                if tgt_key_0 not in target_data:
+                    continue
+           
+                # context construction
+                src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
+                context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).unsqueeze(0)
+           
+                # dataframe -> torch tensors conversion
+                A_sim_df  = source_data[src_key_0]
+                A_data_df = target_data[tgt_key_0]
+                A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
+                A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
+                sigma_latent = 1.0
+                if standardize:
+                    A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
+                    A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
+                    z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
+                    A_sim_scaled = A_sim_scaled + z_latent
+                else:
+                    z_latent = sigma_latent * torch.randn_like(A_sim)
+                    A_sim = A_sim + z_latent
+           
+                
+                # --- APPLICA FLOW PER LA VALIDAZIONE --- #
+                # replica il context per ogni evento di A_sim_scaled
+                context_rep = context.repeat(A_sim_scaled.shape[0], 1)
+                
+                with torch.no_grad():
+                    cond = context_encoder(context_rep)
+                    A_corr_scaled, _ = flow(A_sim_scaled, cond)           
+                           
+                if standardize:
+                    A_corr = A_corr_scaled * std_data + mu_data
+           
+           
+                # A_corr torch → pandas with the same structure of A_sim_scaled (to plot)
+                A_corr_df = pd.DataFrame(
+                    A_corr.detach().cpu().numpy(),
+                    columns=A_sim_df.columns
+                )
+           
+                # --- CREAZIONE VALIDATOR --- #
+                path_to_plots = "./plot/validation_plots/"
+                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}"
+                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T}
+                plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=params, doratio=False, suffix=suffix)
+                
     else:
-        print("Specify at least --train or --validate")
+        print("Specify at least --train or --validate or --matrix")
         exit(0)
         
+
