@@ -296,7 +296,8 @@ def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, p
         # Compute mean and standard deviation for data histogram binning
         mean = np.mean(data_values)
         std = np.std(data_values)
-
+        maxmax=np.max(mc_values)
+        
         # Define histogram bin edges based on the variable name
         if 'Iso' in variable or 'DR' in variable:
             bin_edges = np.linspace(0.0, 3.5, 101)
@@ -304,7 +305,7 @@ def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, p
             bin_edges = np.linspace(0.0, 0.08, 101)
         else:
             bin_min = max(0,mean - 5.0 * std)
-            bin_max = mean + 5.0 * std
+            bin_max = max(mean + 5.0 * std,maxmax)
             bin_edges = np.linspace(bin_min, bin_max, 51)
 
         # Create histograms

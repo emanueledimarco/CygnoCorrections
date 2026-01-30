@@ -1022,6 +1022,6 @@ def print_numeric_validation(A_sim,A_data,A_corr):
 def standardize_dataset(A):
     mean  = A.mean(0)
     std   = A.std(0) + 1e-8
-    print(f"validation standardization: mean = {mean}, std = {std}")
+    # print(f"validation standardization: mean = {mean}, std = {std}")
     A = (A - mean) / std
     return (A,mean,std)
