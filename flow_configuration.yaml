@@ -28,4 +28,8 @@ configuration_2026_lime_v1:
     batch_size           : 20
     sigma_mmd            : 1.0
     lambda_mom           : 1e-4
+    lambda_var           : 0.5
+    lambda_logstd        : 0.1
+    lambda_mean_anchor   : 0.05
+    sigma_latent         : 1
     standardize          : 1

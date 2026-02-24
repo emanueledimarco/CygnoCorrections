@@ -383,196 +383,6 @@ def subsample_dynamic(A, n_max, device="cpu"):
     else:
         raise ValueError(f"Unsupported tensor shape: {A.shape}")
     
-def train_step(
-        step,
-        flow,
-        context_encoder,
-        optimizer,
-        batch,
-        n_events=50,
-        lambda_mom=0.1,
-        test_identity=False,
-        device="cpu"):
-    """
-    Step di training / identity test per un batch.
-    flow: ConditionalFlow
-    context_encoder: ContextEncoder
-    optimizer: torch optimizer
-    batch: dict con 'sim_key', 'data_key', 'A_sim', 'A_data'
-    n_events: numero di eventi da sottocampionare
-    lambda_mom: peso ID loss
-    test_identity: se True usa A_src = A_data
-    device: torch device
-    """
-
-    flow.train()
-    context_encoder.train()
-    optimizer.zero_grad()
-
-    assert batch["A_sim"].shape[-1] == flow.dim
-    
-    # --- selezione dati ---
-    ## EDM prima
-    ##A_sim_full = batch["A_sim"] #.to(device)
-    ##A_data_full = batch["A_data"] #.to(device)
-
-    A_sim_full  = batch["A_sim"]
-    A_data_full = batch["A_data"]
-
-    # rimuovi dimensione batch fittizia
-    A_sim_full  = batch["A_sim"].squeeze(0)    # (Ns, D)
-    A_data_full = batch["A_data"].squeeze(0)   # (Nd, D)
-
-    # NB. Il DataLoader prende solo 1 chiave per batch (batch_size=1) => 1 sola chiave per sim, e 1 per data. Quindi posso normalizzare / chiave
-    sim_key  = batch["sim_key"].view(-1)     # (Cs,) # view(-1) serve a prendere solo l'array piatto del batch, perche' il batch viene dal DataLoader
-    data_key = batch["data_key"].view(-1)    # (Cd,)
-
-    # === REMOVE OBSERVED Z FROM THE CONTEXT, TO FORCE 1:1 MAPPING BETWEEN SIM AND DATA ===
-    data_key_reduced = data_key[..., 1:]
-    
-    # standardizzazione
-    mu_sim = batch["sim_mu"].view(-1)
-    std_sim = batch["sim_std"].view(-1)
-    mu_data = batch["data_mu"].view(-1)
-    std_data = batch["data_std"].view(-1)
-    if step==0:
-        #print("Tensor full = ",A_sim_full)
-        print(f"Before standardization A_sim_full: mu={mu_sim},std={std_sim}")
-        print(f"Before standardization A_data_full: mu={mu_data},std={std_data}")
-    A_sim_full_scaled = standardize(A_sim_full,mu_sim,std_sim)
-    A_data_full_scaled = standardize(A_data_full,mu_data,std_data)
-    if step==0:
-        #print("Tensor scaled = ",A_sim_full)
-        mu_aft=A_sim_full_scaled.mean(dim=0)
-        std_aft=A_sim_full_scaled.std(dim=0)
-        print(f"After standardization, A_sim_full (scaled): mu={mu_aft},std={std_aft}")
-        print(f"After standardization  A_data_full (scaled): mu={A_data_full_scaled.mean(0)},std={A_data_full_scaled.std(0)}")
-        
-    # subsampling coerente dei dataset in batch di n_events ciascuno
-    N = min(len(A_sim_full_scaled), len(A_data_full_scaled), n_events)
-    A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
-    A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
-    
-    if A_sim_sub.shape[1] == 0:
-        # fallback: copia tutti gli eventi disponibili
-        A_sim_sub = A_sim_full_scaled.clone()
-    if A_data_sub.shape[1] == 0:
-        A_data_sub = A_data_full_scaled.clone()
-
-    sigma_latent = 1 # scala circa pari a std dei dati nello spazio standardizzato
-    z_latent = sigma_latent * torch.randn_like(A_sim_sub)
-    # Combina input con latent
-    # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
-    A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
-    
-    # --- Costruzione del contesto ---
-    # --- fundamental (previous bug): context event by event, so for each batch, the context
-    #     (alpha,beta,x,y) is always the same
-    context_vals = torch.cat([sim_key, data_key_reduced], dim=0)  # (C=Cs+Cd,)
-
-    context = context_vals.unsqueeze(0).expand(N, -1)  # (N,C)
-    assert context_vals.dim() == 1, context_vals.shape
-    assert context.shape == (N, context_vals.numel())
-    cond = context_encoder(context)
-
-    # --- forward pass ---
-    A_corr_scaled, _ = flow(A_corr_input, cond)    
-    # print("A_sim_full mean/std:",
-    #       A_sim_full.mean().item(),
-    #       A_sim_full.std().item())
-    # print("A_sim_full_scaled mean/std:",
-    #       A_sim_full_scaled.mean().item(),
-    #       A_sim_full_scaled.std().item())
-    # print("post-flow mean/std:",
-    #       A_corr_scaled.mean().item(),
-    #       A_corr_scaled.std().item())
-
-    # if math.isnan(A_sim_full.std().item()):
-    #     print ("Problematic tensor  = ",A_sim_full)
-    
-    # --- calcolo loss ---
-    if test_identity:
-        # Identity loss
-        id_loss = torch.mean((A_corr_scaled - A_sim_sub)**2)
-        loss_mmd = torch.tensor(0.0, device=device)
-    else:
-        if A_sim_sub.shape[1] == 0 or A_data_sub.shape[1] == 0:
-            # salta questo batch
-            return {
-                "loss": None,
-                "loss_mmd": None,
-                "moment_loss": None,
-                "skip": True
-            }
-        id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
-
-        n_data_feat = A_data_sub.shape[1]
-        # A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda nella versione "in coda"
-        # align MMD with data
-        A_corr_for_mmd = A_corr_scaled - mu_data.detach() # nella versione "latent perturba le variabili direttamente"
-        A_data_sub_mmd = A_data_sub    - mu_data.detach()
-        loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub_mmd)
-
-        if loss_mmd is None:
-            return {
-                "loss": None,
-                "loss_mmd": None,
-                "moment_loss": None,
-                "skip": True
-            }
-
-
-    # --- Calcolo dei termini della loss ---
-    moment_loss = compute_moment_loss(A_corr_scaled,A_data_sub)
-    logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_sub)
-    var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_sub)
-    mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
-    
-    lambda_logstd = 0.0
-    lambda_var = 0.1
-    lambda_mean_anchor = 0.2
-
-    if step==0:
-        print(f"Training lambdas: mom={lambda_mom}, logstd={lambda_logstd}, var={lambda_var}, mean_anchor={lambda_mean_anchor}")
-    
-    # Total loss combinata
-    total_loss = (
-        loss_mmd
-        + lambda_mom * moment_loss
-        + lambda_logstd * logstd_loss_val
-        + lambda_var * var_floor_loss_val
-        + lambda_mean_anchor * mean_anchor_loss_val
-    )
-
-    if step == 0:
-        print(
-            "LOSS CHECK:",
-            loss_mmd.item(),
-            (lambda_mom * moment_loss).item(),
-            (lambda_logstd * logstd_loss_val).item(),
-            (lambda_mean_anchor * mean_anchor_loss_val).item(),
-            "=>",
-            total_loss.item()
-        )
-    
-    assert total_loss.requires_grad
-    
-    # --- backward ---
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
-    
-    return {
-        "loss": total_loss.item(),
-        "loss_mmd": loss_mmd.item(),
-        "moment_loss": moment_loss.item(),
-        "logstd_loss": logstd_loss_val.item(),
-        "var_floor_loss": var_floor_loss_val.item(),
-        "mean_anchor_loss": mean_anchor_loss_val.item(),
-        "skip": False
-    }
-
-
 def compute_moment_loss(A_corr, A_data, weight_std=0.1):
     mu_corr = A_corr.mean(0)
     mu_data = A_data.mean(0)
@@ -702,10 +512,7 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
 
 class SimulationCorrection():
 
-    def __init__(self, configuration, dataset,standardize,
-                 encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
-                 flow_n_layers, flow_hidden_dim, flow_context_dim,
-                 initial_lr, batch_size, lambda_mom):
+    def __init__(self, configuration, conf_dic, dataset, standardize, encoder_input_dim):
 
         # Name of the variables used as conditions and during training
         self.dataset = dataset
@@ -717,20 +524,25 @@ class SimulationCorrection():
         self.device = device
 
         self.encoder_input_dim = encoder_input_dim
-        self.encoder_hidden_dim = encoder_hidden_dim
-        self.encoder_output_dim = encoder_output_dim
-        self.encoder_n_layers = encoder_n_layers
-        self.encoder_dropout = encoder_dropout
+        self.encoder_hidden_dim = conf_dic["encoder_hidden_dim"]
+        self.encoder_output_dim = conf_dic["encoder_output_dim"]
+        self.encoder_n_layers = conf_dic["encoder_n_layers"]
+        self.encoder_dropout = conf_dic["encoder_dropout"]
 
-        self.flow_n_layers = flow_n_layers
-        self.flow_hidden_dim = flow_hidden_dim
-        self.flow_context_dim = flow_context_dim
+        self.flow_n_layers = conf_dic["flow_n_layers"]
+        self.flow_hidden_dim = conf_dic["flow_hidden_dim"]
+        self.flow_context_dim = conf_dic["flow_context_dim"]
         
         # general training hyperparameters
-        self.initial_lr       = initial_lr
-        self.batch_size       = batch_size
-        self.lambda_mom        = lambda_mom
+        self.initial_lr       = conf_dic["initial_lr"]
+        self.batch_size       = conf_dic["batch_size"]
+        self.lambda_mom       = float(conf_dic["lambda_mom"])
+        self.lambda_var       = float(conf_dic["lambda_var"])
+        self.lambda_logstd    = float(conf_dic["lambda_logstd"])
+        self.lambda_mean_anchor    = float(conf_dic["lambda_mean_anchor"])
 
+        self.sigma_latent = float(conf_dic["sigma_latent"])
+        
         # Now, lets open a directory to store the results and models of a given configuration
         self.configuration =  configuration
         #lets create a folder with the results
@@ -770,7 +582,189 @@ class SimulationCorrection():
     def set_validation_case(self, datasets_and_context):
         self.val_case = datasets_and_context
 
+    def train_step(self,
+                   step,
+                   flow,
+                   context_encoder,
+                   optimizer,
+                   batch,
+                   n_events=50,
+                   test_identity=False,
+                   device="cpu"):
+        """
+        Step di training / identity test per un batch.
+        flow: ConditionalFlow
+        context_encoder: ContextEncoder
+        optimizer: torch optimizer
+        batch: dict con 'sim_key', 'data_key', 'A_sim', 'A_data'
+        n_events: numero di eventi da sottocampionare
+        test_identity: se True usa A_src = A_data
+        device: torch device
+        """
+
+        flow.train()
+        context_encoder.train()
+        optimizer.zero_grad()
+     
+        assert batch["A_sim"].shape[-1] == flow.dim
         
+        # --- selezione dati ---
+        ## EDM prima
+        ##A_sim_full = batch["A_sim"] #.to(device)
+        ##A_data_full = batch["A_data"] #.to(device)
+     
+        A_sim_full  = batch["A_sim"]
+        A_data_full = batch["A_data"]
+     
+        # rimuovi dimensione batch fittizia
+        A_sim_full  = batch["A_sim"].squeeze(0)    # (Ns, D)
+        A_data_full = batch["A_data"].squeeze(0)   # (Nd, D)
+     
+        # NB. Il DataLoader prende solo 1 chiave per batch (batch_size=1) => 1 sola chiave per sim, e 1 per data. Quindi posso normalizzare / chiave
+        sim_key  = batch["sim_key"].view(-1)     # (Cs,) # view(-1) serve a prendere solo l'array piatto del batch, perche' il batch viene dal DataLoader
+        data_key = batch["data_key"].view(-1)    # (Cd,)
+     
+        # === REMOVE OBSERVED Z FROM THE CONTEXT, TO FORCE 1:1 MAPPING BETWEEN SIM AND DATA ===
+        data_key_reduced = data_key[..., 1:]
+        
+        # standardizzazione
+        mu_sim = batch["sim_mu"].view(-1)
+        std_sim = batch["sim_std"].view(-1)
+        mu_data = batch["data_mu"].view(-1)
+        std_data = batch["data_std"].view(-1)
+        if step==0:
+            #print("Tensor full = ",A_sim_full)
+            print(f"Before standardization A_sim_full: mu={mu_sim},std={std_sim}")
+            print(f"Before standardization A_data_full: mu={mu_data},std={std_data}")
+        A_sim_full_scaled = standardize(A_sim_full,mu_sim,std_sim)
+        A_data_full_scaled = standardize(A_data_full,mu_data,std_data)
+        if step==0:
+            #print("Tensor scaled = ",A_sim_full)
+            mu_aft=A_sim_full_scaled.mean(dim=0)
+            std_aft=A_sim_full_scaled.std(dim=0)
+            print(f"After standardization, A_sim_full (scaled): mu={mu_aft},std={std_aft}")
+            print(f"After standardization  A_data_full (scaled): mu={A_data_full_scaled.mean(0)},std={A_data_full_scaled.std(0)}")
+            
+        # subsampling coerente dei dataset in batch di n_events ciascuno
+        N = min(len(A_sim_full_scaled), len(A_data_full_scaled), n_events)
+        A_sim_sub  = subsample_dynamic(A_sim_full_scaled, N, device=A_sim_full.device)
+        A_data_sub = subsample_dynamic(A_data_full_scaled, N, device=A_data_full.device)
+        
+        if A_sim_sub.shape[1] == 0:
+            # fallback: copia tutti gli eventi disponibili
+            A_sim_sub = A_sim_full_scaled.clone()
+        if A_data_sub.shape[1] == 0:
+            A_data_sub = A_data_full_scaled.clone()
+     
+        z_latent = self.sigma_latent * torch.randn_like(A_sim_sub) # sigma_latent ~ 1: scala circa pari a std dei dati nello spazio standardizzato
+        # Combina input con latent
+        # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
+        A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
+        
+        # --- Costruzione del contesto ---
+        # --- fundamental (previous bug): context event by event, so for each batch, the context
+        #     (alpha,beta,x,y) is always the same
+        context_vals = torch.cat([sim_key, data_key_reduced], dim=0)  # (C=Cs+Cd,)
+     
+        context = context_vals.unsqueeze(0).expand(N, -1)  # (N,C)
+        assert context_vals.dim() == 1, context_vals.shape
+        assert context.shape == (N, context_vals.numel())
+        cond = context_encoder(context)
+     
+        # --- forward pass ---
+        A_corr_scaled, _ = flow(A_corr_input, cond)    
+        # print("A_sim_full mean/std:",
+        #       A_sim_full.mean().item(),
+        #       A_sim_full.std().item())
+        # print("A_sim_full_scaled mean/std:",
+        #       A_sim_full_scaled.mean().item(),
+        #       A_sim_full_scaled.std().item())
+        # print("post-flow mean/std:",
+        #       A_corr_scaled.mean().item(),
+        #       A_corr_scaled.std().item())
+     
+        # if math.isnan(A_sim_full.std().item()):
+        #     print ("Problematic tensor  = ",A_sim_full)
+        
+        # --- calcolo loss ---
+        if test_identity:
+            # Identity loss
+            id_loss = torch.mean((A_corr_scaled - A_sim_sub)**2)
+            loss_mmd = torch.tensor(0.0, device=device)
+        else:
+            if A_sim_sub.shape[1] == 0 or A_data_sub.shape[1] == 0:
+                # salta questo batch
+                return {
+                    "loss": None,
+                    "loss_mmd": None,
+                    "moment_loss": None,
+                    "skip": True
+                }
+            id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
+     
+            n_data_feat = A_data_sub.shape[1]
+            # A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda nella versione "in coda"
+            # align MMD with data
+            A_corr_for_mmd = A_corr_scaled - mu_data.detach() # nella versione "latent perturba le variabili direttamente"
+            A_data_sub_mmd = A_data_sub    - mu_data.detach()
+            loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub_mmd)
+     
+            if loss_mmd is None:
+                return {
+                    "loss": None,
+                    "loss_mmd": None,
+                    "moment_loss": None,
+                    "skip": True
+                }
+     
+     
+        # --- Calcolo dei termini della loss ---
+        moment_loss = compute_moment_loss(A_corr_scaled,A_data_sub)
+        logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_sub)
+        var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_sub)
+        mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
+        
+        if step==0:
+            print(f"Training lambdas: mom={self.lambda_mom}, logstd={self.lambda_logstd}, var={self.lambda_var}, mean_anchor={self.lambda_mean_anchor}")
+        
+        # Total loss combinata
+        total_loss = (
+            loss_mmd
+            + self.lambda_mom * moment_loss
+            + self.lambda_logstd * logstd_loss_val
+            + self.lambda_var * var_floor_loss_val
+            + self.lambda_mean_anchor * mean_anchor_loss_val
+        )
+     
+        if step == 0:
+            print(
+                "LOSS CHECK:",
+                loss_mmd.item(),
+                (self.lambda_mom * moment_loss).item(),
+                (self.lambda_logstd * logstd_loss_val).item(),
+                (self.lambda_mean_anchor * mean_anchor_loss_val).item(),
+                "=>",
+                total_loss.item()
+            )
+        
+        assert total_loss.requires_grad
+        
+        # --- backward ---
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+        
+        return {
+            "loss": total_loss.item(),
+            "loss_mmd": loss_mmd.item(),
+            "moment_loss": moment_loss.item(),
+            "logstd_loss": logstd_loss_val.item(),
+            "var_floor_loss": var_floor_loss_val.item(),
+            "mean_anchor_loss": mean_anchor_loss_val.item(),
+            "skip": False
+        }
+
+
     def train_the_flow(self, test_identity=False):
 
         loader = DataLoader(self.dataset, batch_size=1, shuffle=True)
@@ -786,7 +780,7 @@ class SimulationCorrection():
         
         for step, batch in enumerate(loader):
 
-            losses = train_step(step, self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size, lambda_mom=self.lambda_mom,test_identity=test_identity,device=self.device)
+            losses = self.train_step(step, self.flow, self.context_encoder, self.optimizer, batch, n_events=self.batch_size,test_identity=test_identity,device=self.device)
             if losses.get("skip", False):
                 continue
             if step % 100 == 0:
@@ -808,6 +802,11 @@ class SimulationCorrection():
                     self.context_encoder,
                     self.val_case,
                     self.batch_size,
+                    self.lambda_mom,
+                    self.lambda_logstd,
+                    self.lambda_var,
+                    self.lambda_mean_anchor,
+                    self.sigma_latent
                 )
                 val_total_loss = val_losses["total_loss"]
                 

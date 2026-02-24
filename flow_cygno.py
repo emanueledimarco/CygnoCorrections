@@ -124,27 +124,10 @@ if __name__ == "__main__":
         
         # context configuration
         raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
-        encoder_input_dim  = raw_context_dim
-        encoder_hidden_dim = dictionary[conf]["encoder_hidden_dim"]
-        encoder_output_dim = dictionary[conf]["encoder_output_dim"]
-        encoder_n_layers   = dictionary[conf]["encoder_n_layers"]
-        encoder_dropout    = dictionary[conf]["encoder_dropout"]
-
-        # flow configuration
-        flow_n_layers = dictionary[conf]["flow_n_layers"]
-        flow_hidden_dim = dictionary[conf]["flow_hidden_dim"]
-        flow_context_dim = dictionary[conf]["flow_context_dim"]
-
-        # general training parameters
-        initial_lr = dictionary[conf]["initial_lr"]
-        batch_size = dictionary[conf]["batch_size"]
-        lambda_mom = float(dictionary[conf]["lambda_mom"])
 
         # build the flow and train it
-        corrections = SimulationCorrection(str(conf),dataset,standardize,
-                                           encoder_input_dim, encoder_hidden_dim, encoder_output_dim, encoder_n_layers, encoder_dropout,
-                                           flow_n_layers, flow_hidden_dim, flow_context_dim,
-                                           initial_lr, batch_size, lambda_mom)
+        corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,raw_context_dim)
+
         corrections.setup_flow()
         corrections.set_validation_case(val_case)
         corrections.train_the_flow(test_identity=args.atomictest)
