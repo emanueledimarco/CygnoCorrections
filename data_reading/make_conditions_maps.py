@@ -3,30 +3,34 @@ import yaml
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from collections import defaultdict
 
-def make_simulation_map(output_file="simulation_map.yaml"):
+def make_simulation_map(base_dir="data/sim/recosim_2k",output_file="simulation_map.yaml"):
     alphas  = np.linspace(0.019,0.023,11)
     lambdas = np.linspace(850,1850,11)
 
     zpos_dic = {1: "5.0", 2: "15.0", 3: "25.0", 4: "35.0", 5: "46.5"}
-    
-    sim_dict = {}
+
+    #sim_dict = {}
+    sim_dict = defaultdict(list)
     for a,alpha in enumerate(alphas):
         for l,Lambda in enumerate(lambdas):
             for z in range(1,6):
-                # non capisco perche' del numero random della digi iniziale, ma tant'e'. Tocca fidarsi del nome del file, non dello step
+                # il numero del run e' fittizio (ordine del job di sim). Quindi si deve usare il numero dello step
                 for step in range(1,6):
-                    filename = f"data/sim/test_recosim/digi_{a}-{l}/iron_step{step}/reco_run0000{z}_3D.root"
-                    if Path(filename).exists():
-                        # remove the files that have only a tiny number of clusters reco (this is a sign of sim/digi/reco problem, not physics)
-                        size_bytes = os.path.getsize(filename)
-                        size_kb = size_bytes / 1024 
-                        if size_kb>100:
-                            key = f"{zpos_dic[z]},{alpha:.4f},{Lambda:.0f}"
-                            sim_dict[key] = filename
+                    for d in Path(base_dir).iterdir():
+                        if d.is_dir():
+                            filename = f"{d}/digi_{a}-{l}/iron_step{step}/reco_run0000{z}_3D.root"
+                            if Path(filename).exists():
+                                # remove the files that have only a tiny number of clusters reco (this is a sign of sim/digi/reco problem, not physics)
+                                size_bytes = os.path.getsize(filename)
+                                size_kb = size_bytes / 1024 
+                                if size_kb>100:
+                                    key = f"{zpos_dic[step]},{alpha:.4f},{Lambda:.0f}"
+                                    sim_dict[key].append(filename)
 
     with open(output_file, "w") as f:
-        yaml.safe_dump(sim_dict, f, sort_keys=True, default_flow_style=False)
+        yaml.safe_dump(dict(sim_dict), f, sort_keys=True, default_flow_style=False)
 
 
 def make_data_map(input_csv="calibration.csv",output_file="data_map.yaml"):
@@ -65,5 +69,5 @@ def make_data_map(input_csv="calibration.csv",output_file="data_map.yaml"):
 if __name__ == "__main__":
 
     make_simulation_map()
-    make_data_map()
+    #make_data_map()
     

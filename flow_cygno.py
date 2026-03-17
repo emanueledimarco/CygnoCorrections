@@ -6,6 +6,7 @@ import argparse
 import os
 import uproot
 import pandas as pd
+from collections import defaultdict
 
 import yaml
 from yaml import Loader
@@ -21,6 +22,7 @@ from plot.plot_utils import plot_distributions
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--onlycache",action="store_true",help="Run only the creation of the panda dataframes and cache them")
     parser.add_argument("--train",action="store_true",help="Run the training step")
     parser.add_argument("--validate",action="store_true",help="Run the validation step")
     parser.add_argument("--matrix",action="store_true",help="Run the matrix validation step (to cover all the Sim x Data conditions")
@@ -45,7 +47,7 @@ if __name__ == "__main__":
 
     cachedir = "data/cache"
     if not args.usecache:
-        source_data = {}
+        source_data_lists = defaultdict(list)
         target_data = {}
      
         sim_map  = dictionary["data_inputs"]["sim_map"]
@@ -59,17 +61,29 @@ if __name__ == "__main__":
                 #print(map_dic)
                 if k=="sim":
                     print("\t==> Simulation now...")
-                    for mapkey,rootfname in map_dic.items():
-                        source_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=False)
+                    for mapkey,files in map_dic.items():
+                        for rootfname in files:
+                            source_data_lists[mapkey].append(read_reco_data_withselection(variables,spectators,[rootfname],isdata=False))
                 else:
                     print("\t==> Data now...")
                     for mapkey,rootfname in map_dic.items():
                         target_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=True)
-                        
+
+        # merge the PDs for the sim, which have multiple files/key
+        print("Concatenate now the split SIM datasets...")
+        source_data = {}
+        for key,dfs in source_data_lists.items():
+            print(f"\tConcatenating {len(dfs)} datasets for key {key}.") 
+            source_data[mapkey] = pd.concat(dfs, ignore_index=True)
+        
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")
         pd.to_pickle(target_data, f"{cachedir}/target_data.pkl")
         print(f"Datasets selected and stored in {cachedir}")
+
+        if args.onlycache:
+            print("Exiting after caching. Now run without --onlycache")
+            exit(0)
 
     else:
         print(f"Reading source_data and target_data from pre-selected Panda DFs in {cachedir}")
