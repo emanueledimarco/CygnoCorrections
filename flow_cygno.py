@@ -74,7 +74,7 @@ if __name__ == "__main__":
         source_data = {}
         for key,dfs in source_data_lists.items():
             print(f"\tConcatenating {len(dfs)} datasets for key {key}.") 
-            source_data[mapkey] = pd.concat(dfs, ignore_index=True)
+            source_data[key] = pd.concat(dfs, ignore_index=True)
         
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")
@@ -109,7 +109,7 @@ if __name__ == "__main__":
      
         # remove the validation case from the training datasets and add it to a separate dic
         print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T) = ({ZV},{PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
-     
+
         source_key_V = (ztrueV,alphaV,lambdaV)
         if source_key_V in source_data:
             val_sim = source_data.pop(source_key_V,None)
