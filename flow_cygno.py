@@ -74,7 +74,7 @@ if __name__ == "__main__":
         source_data = {}
         for key,dfs in source_data_lists.items():
             print(f"\tConcatenating {len(dfs)} datasets for key {key}.") 
-            source_data[mapkey] = pd.concat(dfs, ignore_index=True)
+            source_data[key] = pd.concat(dfs, ignore_index=True)
         
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")
@@ -135,7 +135,7 @@ if __name__ == "__main__":
             target_data=val_data,
             device=device
         )
-        
+
         # context configuration
         raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
 
@@ -250,6 +250,14 @@ if __name__ == "__main__":
         # validazione numerica:
         print_numeric_validation(A_sim_scaled,A_data_scaled,A_corr_scaled)
 
+        print ("Test latent noise")
+        with torch.no_grad():
+            for i in range(10):
+                z = torch.randn_like(A_sim_scaled)
+                A_corr_i, _ = flow(A_sim_scaled + z, cond)
+                print(f"STD on the {i}th sample = {A_corr_i.std(0)}")
+
+        
         import matplotlib.pyplot as plt
         #plt.ion()
         plt.hist(A_sim.cpu(), bins=30, density=True, alpha=0.4, label="sim")
