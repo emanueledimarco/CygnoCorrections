@@ -31,5 +31,5 @@ configuration_2026_lime_v1:
     lambda_var           : 0.5
     lambda_logstd        : 1
     lambda_mean_anchor   : 0.05
-    sigma_latent         : 1
+    sigma_latent         : 2
     standardize          : 1
