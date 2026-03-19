@@ -14,7 +14,7 @@ import json
 
 
 from flow_datasets import UnpairedTransportDataset, build_val_case
-from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset
+from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset, interleave
 from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
 
@@ -193,51 +193,41 @@ if __name__ == "__main__":
         A_data_df = target_data[tgt_key_0]
         A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
         A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
-        sigma_latent = 1.0
+        sigma_latent = dictionary[conf]["sigma_latent"]
         if standardize:
             A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
             A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
             z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
-            A_sim_scaled = A_sim_scaled + z_latent
+            A_corr_input = interleave(A_sim_scaled, z_latent)   # (N, 2D)
+            # A_sim_scaled = A_sim_scaled + z_latent
         else:
             z_latent = sigma_latent * torch.randn_like(A_sim)
-            A_sim = A_sim + z_latent
+            A_corr_input = interleave(A_sim, z_latent)
+            # A_sim = A_sim + z_latent
 
         
         # --- APPLICA FLOW PER LA VALIDAZIONE --- #
         print ("EVALUATE FLOW")
         # replica il context per ogni evento di A_sim_scaled
-        context_rep = context.repeat(A_sim_scaled.shape[0], 1)
-
-        # only for the test
-        src_key_rand = torch.tensor((15.0,0.0230,1850), dtype=torch.float32, device=device)
-        tgt_key_rand = torch.tensor((0.9031,21.1), dtype=torch.float32, device=device)
-        context_random = torch.cat([src_key_rand,tgt_key_rand]).unsqueeze(0)
-        context_random_rep = context_random.repeat(A_sim_scaled.shape[0], 1)
-        
-        # permuta A_sim_scaled
-        perm = torch.randperm(A_sim_scaled.shape[0])
-        A_sim_scaled_perm = A_sim_scaled[perm]
-
+        context_rep = context.repeat(A_corr_input.shape[0], 1)
+        assert context_rep.shape[0] == A_corr_input.shape[0]
         
         with torch.no_grad():
             cond = context_encoder(context_rep)
-            A_corr_scaled, _ = flow(A_sim_scaled, cond)
-            cond_random = context_encoder(context_random_rep)
-            A_corr2, _ = flow(A_sim_scaled, cond_random)
-            A_corr_perm, _ = flow(A_sim_scaled_perm, cond)
+            A_corr_scaled_full, _ = flow(A_corr_input, cond)
+            A_corr_scaled = A_corr_scaled_full[:, 0::2]  # (N, D)
 
-
-        delta = torch.mean((A_corr_scaled - A_corr2)**2).item()
-        print("Context sensitivity:", delta)
-        print("Permutation test:", torch.mean((A_corr_scaled - A_corr_perm)**2))
+        print("SCALED A_corr_scaled = ")
+        print(A_corr_scaled)
         
         if standardize:
             print("De-standardize A_corr")
             print(f"A_corr (scaled): mean={A_corr_scaled.mean(0)}, std={A_corr_scaled.std(0)}")
             A_corr = A_corr_scaled * std_data + mu_data
-            A_corr2 = A_corr2 * std_data + mu_data
             print(f"A_corr (un-scaled): mean={A_corr.mean(0)}, std={A_corr.std(0)}")
+
+        print("DE-SCALED A_corr = ")
+        print(A_corr)
 
         print("FLOW done")
 
@@ -248,14 +238,26 @@ if __name__ == "__main__":
         )
 
         # validazione numerica:
+        print(f"A_sim_scaled.shape = {A_sim_scaled.shape}")
         print_numeric_validation(A_sim_scaled,A_data_scaled,A_corr_scaled)
 
         print ("Test latent noise")
         with torch.no_grad():
             for i in range(10):
-                z = torch.randn_like(A_sim_scaled)
-                A_corr_i, _ = flow(A_sim_scaled + z, cond)
+                z_latent_i = sigma_latent * torch.randn_like(A_sim_scaled)
+                A_corr_input_i = interleave(A_sim_scaled, z_latent_i)   # (N, 2D)
+                A_corr_full_i, _ = flow(A_corr_input_i, cond)
+                A_corr_i = A_corr_full_i[:, 0::2]  # (N, D)
                 print(f"STD on the {i}th sample = {A_corr_i.std(0)}")
+
+        # test semplice
+        z1 = torch.randn_like(A_sim_scaled)
+        z2 = torch.randn_like(A_sim_scaled)
+
+        A1,_ = flow(interleave(A_sim_scaled, z1), cond)
+        A2,_ = flow(interleave(A_sim_scaled, z2), cond)
+
+        print((A1 - A2).abs().mean(0))
 
         
         import matplotlib.pyplot as plt

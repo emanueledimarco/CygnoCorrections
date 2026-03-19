@@ -63,7 +63,7 @@ def get_scalers(dataframe_dic):
     for key, df in dataframe_dic.items():
         tensor = torch.tensor(df.values, dtype=torch.float32)
         mu = tensor.mean(dim=0)
-        std = tensor.std(dim=0)
+        std = tensor.std(dim=0, unbiased=False)
         # attenzione: evitare std=0
         std[std==0] = 1.0
         scalers[key] = {"mu": mu, "std": std}

@@ -76,7 +76,7 @@ def plott_noratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None
         xlabel_new = "light integral [counts]"
         ax.set_xlabel( str(xlabel_new) , fontsize=26)
     elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'\sigma_{t} [pix]'
+        xlabel_new = r'$\sigma_{t}$ [pix]'
         ax.set_xlabel( str(xlabel_new) , fontsize=26)
     elif( "nhits" in str(xlabel)  ):
         xlabel_new = r'n_{hits}'
@@ -238,7 +238,7 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
         xlabel_new = "light integral [counts]"
         ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
     elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'\sigma_{t} [pix]'
+        xlabel_new = r'$\sigma_{t}$ [pix]'
         ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
     elif( "nhits" in str(xlabel)  ):
         xlabel_new = r'n_{hits}'
