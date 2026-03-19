@@ -138,7 +138,8 @@ if __name__ == "__main__":
 
         # context configuration
         raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
-
+        raw_context_dim += len(variables) # add 1 latent noise to each variable in the context
+        
         # build the flow and train it
         corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,raw_context_dim)
 
