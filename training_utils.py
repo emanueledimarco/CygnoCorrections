@@ -469,13 +469,14 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
     K=10    # K = 5 o 10
     for k in range(K):
         z_latent = torch.randn_like(A_sim_scaled) * sigma_latent
-        A_corr_input, _ = flow(A_sim_scaled + z_latent, cond)
+        A_corr_input, _ = flow(torch.cat([A_sim_scaled, z_latent], dim=-1), cond)
+        A_corr_obs = A_corr_input[:, :flow.dim]
         # --- Calcolo dei termini della loss ---
-        val_losses["loss_mmd"].append(conditional_mmd(A_corr_input, A_data_scaled) )
-        val_losses["moment_loss"].append(compute_moment_loss(A_corr_input,A_data_scaled) )
-        val_losses["logstd_loss"].append(compute_logstd_loss(A_corr_input,A_data_scaled) )
-        val_losses["var_floor_loss"].append(compute_var_floor_loss(A_corr_input,A_data_scaled) )
-        val_losses["mean_anchor_loss"].append(compute_mean_anchor_loss(A_corr_input,A_data_scaled) )
+        val_losses["loss_mmd"].append(conditional_mmd(A_corr_obs, A_data_scaled) )
+        val_losses["moment_loss"].append(compute_moment_loss(A_corr_obs,A_data_scaled) )
+        val_losses["logstd_loss"].append(compute_logstd_loss(A_corr_obs,A_data_scaled) )
+        val_losses["var_floor_loss"].append(compute_var_floor_loss(A_corr_obs,A_data_scaled) )
+        val_losses["mean_anchor_loss"].append(compute_mean_anchor_loss(A_corr_obs,A_data_scaled) )
 
     for k,loss in val_losses.items():
         val_losses[k] = torch.stack(val_losses[k]).mean()
@@ -658,8 +659,9 @@ class SimulationCorrection():
      
         z_latent = self.sigma_latent * torch.randn_like(A_sim_sub) # sigma_latent ~ 1: scala circa pari a std dei dati nello spazio standardizzato
         # Combina input con latent
-        # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
-        A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
+        A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
+        A_corr_obs = A_corr_input[:, :flow.dim]
+        # A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
         
         # --- Costruzione del contesto ---
         # --- fundamental (previous bug): context event by event, so for each batch, the context
@@ -672,7 +674,7 @@ class SimulationCorrection():
         cond = context_encoder(context)
      
         # --- forward pass ---
-        A_corr_scaled, _ = flow(A_corr_input, cond)    
+        A_corr_scaled, _ = flow(A_corr_obs, cond)    
         # print("A_sim_full mean/std:",
         #       A_sim_full.mean().item(),
         #       A_sim_full.std().item())
@@ -723,6 +725,10 @@ class SimulationCorrection():
         logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_sub)
         var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_sub)
         mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
+
+        if step%100 == 0:
+            print("STD CORR (batch):", A_corr_scaled.std(0, unbiased=False))
+            print("STD DATA (batch):", A_data_sub.std(0, unbiased=False))
         
         if step==0:
             print(f"Training lambdas: mom={self.lambda_mom}, logstd={self.lambda_logstd}, var={self.lambda_var}, mean_anchor={self.lambda_mean_anchor}")
@@ -1017,6 +1023,8 @@ def print_numeric_validation(A_sim,A_data,A_corr):
     print ("Distance metrics:")
     print("mmd  :", mmd)
     print("ks   :", ks)
+
+    
     
 def standardize_dataset(A):
     mean  = A.mean(0)
