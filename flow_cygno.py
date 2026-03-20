@@ -283,35 +283,31 @@ if __name__ == "__main__":
                 if tgt_key_0 not in target_data:
                     continue
            
-                # context construction
-                src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
-                tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
-                tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
-                context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).unsqueeze(0)
            
                 # dataframe -> torch tensors conversion
                 A_sim_df  = source_data[src_key_0]
                 A_data_df = target_data[tgt_key_0]
                 A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
                 A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
-                sigma_latent = 1.0
+                
+                # context construction
+                src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
+                raw_context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).expand(A_sim.shape[0],-1)        
+                sigma_latent = dictionary[conf]["sigma_latent"]
                 if standardize:
                     A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
                     A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
                     z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
-                    A_sim_scaled = A_sim_scaled + z_latent
                 else:
                     z_latent = sigma_latent * torch.randn_like(A_sim)
-                    A_sim = A_sim + z_latent
-           
-                
+                context_input = torch.cat([raw_context, z_latent], dim=1)
+
                 # --- APPLICA FLOW PER LA VALIDAZIONE --- #
-                # replica il context per ogni evento di A_sim_scaled
-                context_rep = context.repeat(A_sim_scaled.shape[0], 1)
-                
                 with torch.no_grad():
-                    cond = context_encoder(context_rep)
-                    A_corr_scaled, _ = flow(A_sim_scaled, cond)           
+                    cond = context_encoder(context_input)
+                    A_corr_scaled, _ = flow(A_sim_scaled, cond)
                            
                 if standardize:
                     A_corr = A_corr_scaled * std_data + mu_data
