@@ -17,7 +17,7 @@ from flow_datasets import UnpairedTransportDataset, build_val_case
 from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset, interleave
 from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
-
+from plot.validation_utils import *
 
 if __name__ == "__main__":
 
@@ -231,22 +231,19 @@ if __name__ == "__main__":
         )
 
         # validazione numerica:
-        print(f"A_sim_scaled.shape = {A_sim_scaled.shape}")
         print_numeric_validation(A_sim_scaled,A_data_scaled,A_corr_scaled)
-
-        import matplotlib.pyplot as plt
-        #plt.ion()
-        plt.hist(A_sim.cpu(), bins=30, density=True, alpha=0.4, label="sim")
-        plt.hist(A_data.cpu(), bins=30, density=True, alpha=0.4, label="data")
-        plt.hist(A_corr.cpu(), bins=30, density=True, alpha=0.4, label="corr")
-        plt.legend()
-        plt.savefig("basic_test.pdf")
-        plt.show(block=False)
-        
+        # global metrics:
+        metrics = compute_validation_metrics(A_corr_scaled,A_data_scaled)
+        print("==== GLOBAL VALIDATION ====")
+        for k,m in metrics.items():
+            print(f"{k} : {m}")
+        print("===========================")
         
         # --- CREAZIONE VALIDATOR --- #
         path_to_plots = "./plot/validation_plots/"
         plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=dictionary["data_inputs"], doratio=False)
+        if len(variables)>1:
+            plot_2d_comparison(A_sim, A_corr, A_data, variables[:2], path_to_plots, params=dictionary["data_inputs"])
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
         output_root = "validation_output.root"

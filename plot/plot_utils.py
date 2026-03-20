@@ -14,6 +14,11 @@ var_list = ["sc_integral",
             "sc_tgausssigma",
             "sc_nhits"]
 
+var_titles = {"sc_integral"    : "light integral [counts]",
+              "sc_tgausssigma" : "$\sigma_{t}$ [pix]",
+              "sc_nhits"       : "$n_{hits}$ [counts]"}
+
+
 # The next three functions are related to the plotting of the profiles of the LY as a function of cluster shape variables
 # This function calculate the means of the input quantiles! - Weighted mean, of couse.
 def weighted_quantiles_interpolate(values, weights, quantiles=0.5):
