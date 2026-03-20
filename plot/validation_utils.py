@@ -1,5 +1,5 @@
 import torch
-import os
+import os,random
 import numpy as np
 import matplotlib.pyplot as plt
 import mplhep, hist
@@ -135,5 +135,9 @@ def plot_2d_comparison(A_sim, A_corr, A_data, variables_to_plot, path, params=No
     print(f"===> 2D Validation save plot {output_path}.pdf/png")
     for ext in ["png","pdf"]:
         fig.savefig(f"{output_path}.{ext}")
+    plt.close()
 
-
+def random_ordered_pair(lst):
+    i = random.randint(0, len(lst) - 2)
+    j = random.randint(i + 1, len(lst) - 1)
+    return [lst[i], lst[j]]

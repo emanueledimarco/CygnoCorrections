@@ -210,17 +210,11 @@ if __name__ == "__main__":
             cond = context_encoder(context_input)
             A_corr_scaled, _ = flow(A_sim_scaled, cond)
 
-        print("SCALED A_corr_scaled = ")
-        print(A_corr_scaled)
-        
         if standardize:
             print("De-standardize A_corr")
             print(f"A_corr (scaled): mean={A_corr_scaled.mean(0)}, std={A_corr_scaled.std(0)}")
             A_corr = A_corr_scaled * std_data + mu_data
             print(f"A_corr (un-scaled): mean={A_corr.mean(0)}, std={A_corr.std(0)}")
-
-        print("DE-SCALED A_corr = ")
-        print(A_corr)
 
         print("FLOW done")
 
@@ -243,7 +237,8 @@ if __name__ == "__main__":
         path_to_plots = "./plot/validation_plots/"
         plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=dictionary["data_inputs"], doratio=False)
         if len(variables)>1:
-            plot_2d_comparison(A_sim, A_corr, A_data, variables[:2], path_to_plots, params=dictionary["data_inputs"])
+            vars_to_plot = random_ordered_pair(variables)
+            plot_2d_comparison(A_sim, A_corr, A_data, vars_to_plot, path_to_plots, params=dictionary["data_inputs"])
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
         output_root = "validation_output.root"
@@ -267,7 +262,10 @@ if __name__ == "__main__":
         print("Modello caricato!")
         print("Step migliore:", meta.get("best_step"))
         print("Val MMD:", meta.get("best_val_mmd"))
-
+        print(f"Matrix of tests: [{len(source_data.keys())}(sim)x{len(target_data.keys())}(data)] = {len(source_data.keys())*len(target_data.keys())} flows")
+        
+        metrics_list = []
+        i=0
         for sim_k in source_data.keys():
             Z,Alpha,Lambda = sim_k
             for data_k in target_data.keys():
@@ -315,12 +313,29 @@ if __name__ == "__main__":
                     A_corr.detach().cpu().numpy(),
                     columns=A_sim_df.columns
                 )
-           
+
+                metrics = compute_validation_metrics(A_corr_scaled,A_data_scaled)
+                metrics['case_idx'] = i
+                metrics_list.append(metrics)
+                
                 # --- CREAZIONE VALIDATOR --- #
-                path_to_plots = "./plot/validation_plots/"
-                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}"
-                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T}
-                plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=params, doratio=False, suffix=suffix)
+                # --- optional: plot per casi selezionati ---
+                if i % max(1, len(source_data.keys())*len(target_data.keys())%200) == 0:
+                    path_to_plots = "./plot/validation_plots/"
+                    suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}"
+                    params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T}
+                
+                    plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=params, doratio=False, suffix=suffix)
+                    if len(variables)>1:
+                        vars_to_plot = random_ordered_pair(variables)
+                        plot_2d_comparison(A_sim, A_corr, A_data, vars_to_plot, path_to_plots, params=params, suffix=suffix)
+            i = i+1
+        
+        summary = aggregate_metrics(metrics_list)
+        print("==== GLOBAL VALIDATION ====")
+        for k, v in summary.items():
+            print(f"{k}: {v:.4f}")
+        print("===========================")
                 
     else:
         print("Specify at least --train or --validate or --matrix")

@@ -12,11 +12,15 @@ import os
 # Names of the used variables, I copied it here only so it is easier to use it acess the labels and names of teh distirbutions
 var_list = ["sc_integral",
             "sc_tgausssigma",
-            "sc_nhits"]
+            "sc_nhits",
+            "sc_width"]
 
 var_titles = {"sc_integral"    : "light integral [counts]",
               "sc_tgausssigma" : "$\sigma_{t}$ [pix]",
-              "sc_nhits"       : "$n_{hits}$ [counts]"}
+              "sc_nhits"       : "$n_{hits}$ [counts]",
+              "sc_width"       : "width [pix]",
+              "sc_length"      : "length [pix]",
+              }
 
 
 # The next three functions are related to the plotting of the profiles of the LY as a function of cluster shape variables
@@ -116,7 +120,7 @@ def plott_noratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None
     print(f"===> Validation save plot {output_filename}.pdf/png")
     for ext in ["png","pdf"]:
         fig.savefig(f"{output_filename}.{ext}")
-
+    plt.close()
     
 # this is the main plotting function, all the other will basically set up something to call this one in the end!
 def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
@@ -284,7 +288,8 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
     fig.tight_layout(h_pad=0, w_pad=0)
 
     fig.savefig(output_filename)
-
+    plt.close()
+    
 def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, params=None, doratio=False, suffix=None ):
 
     # Ensure the output directory exists

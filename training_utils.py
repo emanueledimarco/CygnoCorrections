@@ -766,15 +766,15 @@ class SimulationCorrection():
         mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
         cov_loss_val = compute_cov_loss(A_corr_scaled,A_data_sub)
         
-        if step%100 == 0:
-            print("Means CORR (batch):", A_corr_scaled.mean(0))
-            print("Means DATA (batch):", A_data_sub.mean(0))
+        # if step%100 == 0:
+        #     print("Means CORR (batch):", A_corr_scaled.mean(0))
+        #     print("Means DATA (batch):", A_data_sub.mean(0))
 
-            print("Std CORR (batch):", A_corr_scaled.std(0, unbiased=False))
-            print("Std DATA (batch):", A_data_sub.std(0, unbiased=False))
+        #     print("Std CORR (batch):", A_corr_scaled.std(0, unbiased=False))
+        #     print("Std DATA (batch):", A_data_sub.std(0, unbiased=False))
 
-            print("Cov CORR (batch):", torch.cov(A_corr_scaled.T))
-            print("Cov DATA (batch):", torch.cov(A_data_sub.T))
+        #     print("Cov CORR (batch):", torch.cov(A_corr_scaled.T))
+        #     print("Cov DATA (batch):", torch.cov(A_data_sub.T))
 
         if step==0:
             print(f"Training lambdas: mom={self.lambda_mom}, logstd={self.lambda_logstd}, var={self.lambda_var}, mean_anchor={self.lambda_mean_anchor}, cov={self.lambda_cov}")
