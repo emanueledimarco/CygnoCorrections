@@ -27,10 +27,10 @@ configuration_2026_lime_v1:
     initial_lr           : 5.0e-4
     batch_size           : 500
     sigma_mmd            : 1.0
-    lambda_mom           : 0.05
+    lambda_mom           : 0.7
     lambda_var           : 1
     lambda_logstd        : 5
     lambda_mean_anchor   : 0.05
-    lambda_cov           : 0.5
-    sigma_latent         : 2
+    lambda_cov           : 1
+    sigma_latent         : 1
     standardize          : 1

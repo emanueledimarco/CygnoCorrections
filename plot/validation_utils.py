@@ -141,3 +141,41 @@ def random_ordered_pair(lst):
     i = random.randint(0, len(lst) - 2)
     j = random.randint(i + 1, len(lst) - 1)
     return [lst[i], lst[j]]
+
+def debug_variance(A_sim,raw_context,encoder,flow):
+    print("=== Debug variance of the ouptut === ")
+    
+    # debug latent noise
+    # Prendi un singolo evento di esempio
+    idx = 0 
+    x_sample = A_sim[idx:idx+1]
+    raw_ctx_sample = raw_context[idx:idx+1]
+
+    # TEST DI SENSIBILITÀ
+    # 1. Genera due rumori diversi
+    z1 = torch.randn_like(x_sample) * 1.0
+    z2 = torch.randn_like(x_sample) * 1.0
+    
+    # 2. Passali nell'encoder
+    cond1 = encoder(torch.cat([raw_ctx_sample, z1], dim=1))
+    cond2 = encoder(torch.cat([raw_ctx_sample, z2], dim=1))
+    
+    # Verifica se l'encoder propaga il rumore
+    diff_cond = torch.abs(cond1 - cond2).mean()
+    print(f"Differenza nel condizionamento (Encoder output): {diff_cond.item():.8f}")
+    
+    # 3. Verifica se il Flow reagisce (prendi il primo layer di coupling)
+    # Supponendo che flow.layers sia la lista dei tuoi layer
+    first_coupling = flow.layers[0] 
+    
+    # Dobbiamo simulare l'input interno del coupling (x_masked + cond)
+    # Usiamo una funzione di appoggio o guardiamo direttamente s e t
+    # (Adattalo ai nomi delle tue variabili interne)
+    s1, _ = first_coupling.st_net(torch.cat([x_sample[:, first_coupling.mask.bool()], cond1], dim=1)).chunk(2, dim=1)
+    s2, _ = first_coupling.st_net(torch.cat([x_sample[:, first_coupling.mask.bool()], cond2], dim=1)).chunk(2, dim=1)
+    
+    diff_s = torch.abs(s1 - s2).mean()
+    print(f"Differenza nello scale (s) del Flow: {diff_s.item():.8f}")
+    print("=== Debug variance of the ouptut done. === ")
+
+    

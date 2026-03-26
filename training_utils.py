@@ -33,11 +33,17 @@ class ConditionalAffineCoupling(nn.Module):
         input_dim = self.dim_masked + context_dim
         self.st_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_dim, 2 * self.dim_unmasked)
         )
+
+        nn.init.zeros_(self.st_net[-1].weight)
+        nn.init.zeros_(self.st_net[-1].bias)
+
+        # log_scale_factor per dare respiro alla varianza
+        self.rescale_s = nn.Parameter(torch.ones(self.dim_unmasked))
 
     def forward(self, x, context=None):
         """
@@ -55,13 +61,6 @@ class ConditionalAffineCoupling(nn.Module):
         x_obs = x_flat[:, :base_dim]  
         x_masked = x_obs[:, base_mask_bool]
 
-        # --- mask esteso SOLO per decidere cosa trasformare ---
-        # if x_flat.shape[1] > base_mask.shape[0]:
-        #     n_latent = x_flat.shape[1] - base_mask.shape[0]
-        #     latent_mask = torch.ones(n_latent, device=x.device)
-        #     full_mask = torch.cat([base_mask, latent_mask], dim=0)
-        # else:
-        #     full_mask = base_mask
         full_mask = base_mask # questo col latent noise nel contesto        
         full_mask_bool = full_mask.bool()
         
@@ -80,7 +79,9 @@ class ConditionalAffineCoupling(nn.Module):
 
         # calcola scale e shift
         s, t = self.st_net(net_input).chunk(2, dim=1)
-        s = torch.tanh(s)  # stabilizza numericamente
+        # Usiamo tanh per stabilità ma permettiamo al parametro rescale_s 
+        # di imparare quanto "allargare" la distribuzione
+        s = torch.tanh(s) * self.rescale_s  
 
         # applica affine solo alle feature non mascherate
         y_flat = x_flat.clone()
@@ -108,18 +109,8 @@ class ConditionalAffineCoupling(nn.Module):
         y_obs = y_flat[:, :base_dim]
         y_masked = y_obs[:, base_mask_bool]
 
-        # --- mask esteso SOLO per decidere cosa trasformare ---
-        # if y_flat.shape[1] > base_mask.shape[0]:
-        #     n_latent = y_flat.shape[1] - base_mask.shape[0]
-        #     latent_mask = torch.ones(n_latent, device=y.device)
-        #     full_mask = torch.cat([base_mask, latent_mask], dim=0)
-        # else:
-        #     full_mask = base_mask
-
         full_mask = base_mask
         full_mask_bool = full_mask.bool()
-
-
         
         if context is not None:
             context_flat = context.view(y_masked.shape[0], -1)
@@ -128,7 +119,7 @@ class ConditionalAffineCoupling(nn.Module):
             net_input = y_masked
 
         s, t = self.st_net(net_input).chunk(2, dim=1)
-        s = torch.tanh(s)
+        s = torch.tanh(s) * self.rescale_s
 
         x_flat = y_flat.clone()
         x_flat[:, (~full_mask_bool)] = (y_flat[:, (~full_mask_bool)] - t) * torch.exp(-s)
@@ -136,7 +127,16 @@ class ConditionalAffineCoupling(nn.Module):
         x = x_flat.view(*orig_shape)
         log_det = -s.sum(dim=1)
 
-        return x    
+        return x
+
+    def get_diagnostics(self):
+        with torch.no_grad():
+            scales = self.rescale_s.detach().cpu()
+            return {
+                "rescale_s_mean": scales.mean().item(),
+                "rescale_s_max": scales.max().item(),
+                "rescale_s_min": scales.min().item()
+            }
 
 def sanity_check_coupling(flow, context_encoder, device="cpu"):
     flow.eval()
@@ -158,25 +158,6 @@ def sanity_check_coupling(flow, context_encoder, device="cpu"):
         print("[SANITY CHECK] max |x - inverse(forward(x))| =",
               (x_in - x_rec).abs().max().item())
     
-    # with torch.no_grad():
-    #     B = 10
-    #     # prendi un layer reale dal flow
-    #     layer = flow.layers[0]
- 
-    #     D = flow.dim
-    #     context_dim = context_encoder.output_dim
- 
-    #     x = torch.randn(B, D, device=device)
-        
-    #     context = torch.randn(10, context_dim, device=device)
- 
-    #     y, _ = layer(x, context)
-    #     x_rec = layer.inverse(y, context)
- 
-    #     max_err = (x - x_rec).abs().max().item()
-    #     print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
- 
-    #     assert max_err < 1e-6, "Coupling layer is NOT invertible!"
 
 class ConditionalFlow(nn.Module):
     def __init__(self, dim, n_layers, hidden_dim, masks, context_dim=0):
@@ -219,6 +200,8 @@ class ConditionalFlow(nn.Module):
         for layer in self.layers:
             y, log_det = layer(y, context)
             log_det_total += log_det
+            # diagnostics = layer.get_diagnostics()
+            # print(f"Scale stats: {diagnostics}")
         return y, log_det_total
 
     def inverse(self, z, context=None):
@@ -266,7 +249,7 @@ class ContextEncoder(nn.Module):
         hidden_dim,
         output_dim,
         n_layers=2,
-        activation=nn.ReLU,
+        activation=nn.ELU,
         dropout=0.0
     ):
         super().__init__()
@@ -896,36 +879,6 @@ class SimulationCorrection():
                     break
             
             
-            # if step % val_every == 0 and step > 0:
-
-            #     val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size)
-         
-            #     print(f"  → Validation MMD = {val_mmd:.4f}")
-         
-            #     if val_mmd < best_val_mmd - min_delta:
-            #         best_val_mmd = val_mmd
-            #         best_step = step
-
-            #         # Save the output
-            #         torch.save({
-            #             "flow_state": self.flow.state_dict(),
-            #             "context_state": self.context_encoder.state_dict(),
-            #             "flow_config": self.flow.get_config(),
-            #             "context_config": self.context_encoder.get_config(),
-            #             "best_step": step,
-            #             "best_val_mmd": best_val_mmd,
-            #             "lambda_mom": self.lambda_mom
-            #         }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
-         
-            #         print(f"  ✓ new best model at step {step}")
-         
-            #     elif step - best_step > patience:
-            #         print(
-            #             f"Early stopping at step {step} "
-            #             f"(best step {best_step}, val MMD {best_val_mmd:.4f})"
-            #         )
-            #         break
-                   
 def load_model(
     checkpoint_path,
     device="cpu",
