@@ -5,6 +5,8 @@
     ],
     "spectator_list": [
 	"sc_xmean",
-	"sc_ymean"
+	"sc_ymean",
+	"sc_width",
+	"sc_length"
     ]
 }

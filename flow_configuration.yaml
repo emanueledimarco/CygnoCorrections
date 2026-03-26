@@ -5,15 +5,15 @@ data_inputs:
     alpha_ref  : 0.0210
     lambda_ref : 1350
     ztrue_ref  : 25.0
-    P_ref      : 0.9070
-    T_ref      : 20.6
+    P_ref      : 0.916
+    T_ref      : 21.4
     sim_map    : simulation_map.yaml
     data_map   : data_map.yaml
     alpha_val  : 0.0202
     lambda_val : 1050
     ztrue_val  : 25.0
-    P_val      : 0.9170
-    T_val      : 20.6
+    P_val      : 0.909
+    T_val      : 21.1
 
 
 configuration_2026_lime_v1:

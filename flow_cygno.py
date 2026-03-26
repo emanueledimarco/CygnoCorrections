@@ -48,7 +48,7 @@ if __name__ == "__main__":
     cachedir = "data/cache"
     if not args.usecache:
         source_data_lists = defaultdict(list)
-        target_data = {}
+        target_data_lists = defaultdict(list)
      
         sim_map  = dictionary["data_inputs"]["sim_map"]
         data_map = dictionary["data_inputs"]["data_map"]
@@ -66,15 +66,20 @@ if __name__ == "__main__":
                             source_data_lists[mapkey].append(read_reco_data_withselection(variables,spectators,[rootfname],isdata=False))
                 else:
                     print("\t==> Data now...")
-                    for mapkey,rootfname in map_dic.items():
-                        target_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=True)
+                    for mapkey,files in map_dic.items():
+                        for rootfname in files:
+                            target_data_lists[mapkey].append(read_reco_data_withselection(variables,spectators,[rootfname],isdata=True))
 
         # merge the PDs for the sim, which have multiple files/key
         print("Concatenate now the split SIM datasets...")
         source_data = {}
+        target_data = {}
         for key,dfs in source_data_lists.items():
-            print(f"\tConcatenating {len(dfs)} datasets for key {key}.") 
+            print(f"\tConcatenating SIM: {len(dfs)} datasets for key {key}.") 
             source_data[key] = pd.concat(dfs, ignore_index=True)
+        for key,dfs in target_data_lists.items():
+            print(f"\tConcatenating DATA: {len(dfs)} datasets for key {key}.") 
+            target_data[key] = pd.concat(dfs, ignore_index=True)
         
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")

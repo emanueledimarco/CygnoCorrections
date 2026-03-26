@@ -36,13 +36,15 @@ def perform_cluster_selection(arrays,isdata):
     if isdata: 
         # Define individual selection criteria
         # basically remove noise at low LY and borders of the sensor
+        arrays["sc_slimness"] = arrays["sc_width"]/arrays["sc_length"]
         mask = (
             (arrays["sc_integral"] > 2000) &
-            (arrays["sc_integral"] < 10000) &
+            (arrays["sc_integral"] < 50000) &
             (arrays["sc_xmean"] > 500) &
             (arrays["sc_xmean"] < 2000) &
             (arrays["sc_ymean"] > 500) &
-            (arrays["sc_ymean"] < 2000)
+            (arrays["sc_ymean"] < 2000) &
+            (arrays["sc_slimness"] > 0.7) # remove the double ~overlapping clusters
         )
 
         # Apply mask to filter DataFrame
