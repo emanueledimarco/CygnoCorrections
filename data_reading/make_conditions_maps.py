@@ -62,7 +62,7 @@ def make_data_map(input_csv="data/runs/recodata_run4/calibration.csv",output_fil
     print(f"In principle I could select {nz*nP*nT} points, but some bins can be empty, so I selected instead {len(grouped)} combinations of z, P, T:\n\n")
 
     data_dict = {
-        (float(z), float(round(P.mid,3)), float(round(T.mid,1))): [int(r) for r in runs]
+        (float(z), float(round(P.mid,3)), float(round(T.mid,1))): [f"data/runs/recodata_run4/reco_run{int(r)}_3D.root" for r in runs]
         for (z, P, T), runs in grouped.items()
     }
 
