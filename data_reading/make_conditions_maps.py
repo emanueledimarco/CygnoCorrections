@@ -33,41 +33,48 @@ def make_simulation_map(base_dir="data/sim/recosim_2k",output_file="simulation_m
         yaml.safe_dump(dict(sim_dict), f, sort_keys=True, default_flow_style=False)
 
 
-def make_data_map(input_csv="calibration.csv",output_file="data_map.yaml"):
-    df = pd.read_csv(input_csv, sep=";")
+def make_data_map(input_csv="data/runs/recodata_run4/calibration.csv",output_file="data_map.yaml"):
+    df = pd.read_csv(input_csv, sep=",")
 
-    nz = nP = nT = 5
-
-    print(f"Now will choose a set of {nz} points in z, {nP} points in P and {nT} points in T sampling uniformly from their min/max values")
+    nP = nT = 5
     
-    z_bins = np.linspace(df["z"].min(), df["z"].max(), nz + 1)
+    z_vals = df["z"].unique()
     P_bins = np.linspace(df["P"].min(), df["P"].max(), nP + 1)
     T_bins = np.linspace(df["T"].min(), df["T"].max(), nT + 1)
 
+    nz = len(z_vals)
+    print(f"Now will choose a set of {nz} points in z, {nP} points in P and {nT} points in T sampling uniformly from their min/max values")
+    
     df = df.copy()
 
-    df["z_bin"] = pd.cut(df["z"], z_bins, include_lowest=True)
+    
+    df["z_bin"] = (df[df["z"].isin(z_vals)])["z"]
     df["P_bin"] = pd.cut(df["P"], P_bins, include_lowest=True)
     df["T_bin"] = pd.cut(df["T"], T_bins, include_lowest=True)
 
-    sampled = (
-    df
-    .dropna(subset=["z_bin", "P_bin", "T_bin"])
-    .groupby(["z_bin", "P_bin", "T_bin"], observed=True)
-    .sample(n=1, random_state=42)
-    .reset_index(drop=True)
+    grouped = (
+        df
+        .dropna(subset=["z_bin", "P_bin", "T_bin"])
+        .groupby(["z_bin", "P_bin", "T_bin"], observed=True)["run"]
+        .apply(list)
     )
 
-    print(f"In principle I could select {nz*nP*nT} points, but some bins can be empty, so I selected instead {len(sampled)} runs:\n\n")
-    # print(sampled[["z", "P", "T", "run"]])
+    print(f"In principle I could select {nz*nP*nT} points, but some bins can be empty, so I selected instead {len(grouped)} combinations of z, P, T:\n\n")
 
-    data_dict = { f'{row["z"]:.1f},{row["P"]:.4f},{row["T"]:.1f}': f"reco_run{int(row.run)}_3D.root" for _, row in sampled.iterrows() }
+    data_dict = {
+        (float(z), float(round(P.mid,3)), float(round(T.mid,1))): [int(r) for r in runs]
+        for (z, P, T), runs in grouped.items()
+    }
+
+    data_dict_simplekeys = {", ".join(map(str, k)): v for k, v in data_dict.items()}
+    print(data_dict_simplekeys)
     
     with open(output_file, "w") as f:
-        yaml.safe_dump(data_dict, f, sort_keys=True, default_flow_style=False)
+        yaml.safe_dump(data_dict_simplekeys, f, sort_keys=True, default_flow_style=False)
+
     
 if __name__ == "__main__":
 
     make_simulation_map()
-    #make_data_map()
+    make_data_map()
     
