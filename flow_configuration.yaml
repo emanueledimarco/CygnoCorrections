@@ -22,7 +22,7 @@ configuration_2026_lime_v1:
     encoder_n_layers     : 2
     encoder_dropout      : 0.1
     flow_n_layers        : 6
-    flow_hidden_dim      : 128
+    flow_hidden_dim      : 64
     flow_context_dim     : 32
     initial_lr           : 5.0e-4
     batch_size           : 500
@@ -31,6 +31,6 @@ configuration_2026_lime_v1:
     lambda_var           : 1
     lambda_logstd        : 5
     lambda_mean_anchor   : 0.05
-    lambda_cov           : 0.1
+    lambda_cov           : 0.5
     sigma_latent         : 2
     standardize          : 1
