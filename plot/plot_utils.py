@@ -314,7 +314,7 @@ def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, p
 
         text=None
         if params:
-            text = f"z = {params['ztrue_val']} cm\nSim: $\lambda_{{abs}}$={params['lambda_val']}mm, $\\alpha$={params['alpha_val']}\nData: P={params['P_val']}bar, T={params['T_val']}C"
+            text = f"z = {params['ztrue_val']} cm\nSim: $\lambda_{{abs}}$={params['lambda_val']}mm, $\\alpha$={params['alpha_val']}\nData: P={params['P_val']}bar, T={params['T_val']}C,\n         H={params['H_val']}a.u."
         # Plot and save the histograms
         suff=f"_{suffix}" if suffix else ""
         suff = suff.replace(".","p")

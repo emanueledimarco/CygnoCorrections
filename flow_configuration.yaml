@@ -7,13 +7,15 @@ data_inputs:
     ztrue_ref  : 25.0
     P_ref      : 0.916
     T_ref      : 21.4
+    H_ref      : 1.1
     sim_map    : simulation_map.yaml
     data_map   : data_map.yaml
     alpha_val  : 0.0202
     lambda_val : 1050
     ztrue_val  : 25.0
-    P_val      : 0.909
+    P_val      : 0.916
     T_val      : 21.1
+    H_val      : 1.3
 
 
 configuration_2026_lime_v1:
@@ -28,9 +30,9 @@ configuration_2026_lime_v1:
     batch_size           : 500
     sigma_mmd            : 1.0
     lambda_mom           : 0.7
-    lambda_var           : 1
-    lambda_logstd        : 5
+    lambda_var           : 0.7
+    lambda_logstd        : 2
     lambda_mean_anchor   : 0.05
     lambda_cov           : 1
-    sigma_latent         : 1
+    sigma_latent         : 0.5
     standardize          : 1

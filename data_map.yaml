@@ -1,61 +1,70 @@
-15.0, 0.894, 21.1:
+15.0, 0.894, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47345_3D.root
-15.0, 0.894, 21.4:
+15.0, 0.894, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43526_3D.root
 - data/runs/recodata_run4/reco_run44370_3D.root
-15.0, 0.902, 20.1:
+15.0, 0.902, 20.1, 1.3:
 - data/runs/recodata_run4/reco_run41163_3D.root
-15.0, 0.902, 21.1:
+15.0, 0.902, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run42675_3D.root
 - data/runs/recodata_run4/reco_run47147_3D.root
+- data/runs/recodata_run4/reco_run53492_3D.root
+15.0, 0.902, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run50265_3D.root
 - data/runs/recodata_run4/reco_run50746_3D.root
 - data/runs/recodata_run4/reco_run53180_3D.root
-- data/runs/recodata_run4/reco_run53492_3D.root
-15.0, 0.902, 21.4:
-- data/runs/recodata_run4/reco_run43467_3D.root
-- data/runs/recodata_run4/reco_run43490_3D.root
-- data/runs/recodata_run4/reco_run43533_3D.root
+15.0, 0.902, 21.4, 0.9:
 - data/runs/recodata_run4/reco_run44050_3D.root
 - data/runs/recodata_run4/reco_run44206_3D.root
+15.0, 0.902, 21.4, 1.1:
+- data/runs/recodata_run4/reco_run43467_3D.root
+- data/runs/recodata_run4/reco_run43490_3D.root
 - data/runs/recodata_run4/reco_run44556_3D.root
-- data/runs/recodata_run4/reco_run47500_3D.root
+15.0, 0.902, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43533_3D.root
 - data/runs/recodata_run4/reco_run49168_3D.root
 - data/runs/recodata_run4/reco_run49336_3D.root
 - data/runs/recodata_run4/reco_run49641_3D.root
 - data/runs/recodata_run4/reco_run49790_3D.root
-- data/runs/recodata_run4/reco_run50155_3D.root
 - data/runs/recodata_run4/reco_run53336_3D.root
-15.0, 0.909, 20.4:
+15.0, 0.902, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47500_3D.root
+- data/runs/recodata_run4/reco_run50155_3D.root
+15.0, 0.909, 20.4, 1.3:
 - data/runs/recodata_run4/reco_run41371_3D.root
 - data/runs/recodata_run4/reco_run41542_3D.root
-15.0, 0.909, 20.7:
+15.0, 0.909, 20.7, 1.1:
 - data/runs/recodata_run4/reco_run41738_3D.root
 - data/runs/recodata_run4/reco_run41924_3D.root
-15.0, 0.909, 21.1:
+15.0, 0.909, 21.1, 1.1:
 - data/runs/recodata_run4/reco_run42120_3D.root
 - data/runs/recodata_run4/reco_run42314_3D.root
 - data/runs/recodata_run4/reco_run42467_3D.root
 - data/runs/recodata_run4/reco_run43367_3D.root
+15.0, 0.909, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47046_3D.root
+15.0, 0.909, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run47101_3D.root
 - data/runs/recodata_run4/reco_run50895_3D.root
-15.0, 0.909, 21.4:
-- data/runs/recodata_run4/reco_run42852_3D.root
+15.0, 0.909, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43852_3D.root
+15.0, 0.909, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43418_3D.root
+15.0, 0.909, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run42852_3D.root
 - data/runs/recodata_run4/reco_run43512_3D.root
 - data/runs/recodata_run4/reco_run43519_3D.root
-- data/runs/recodata_run4/reco_run43852_3D.root
 - data/runs/recodata_run4/reco_run47651_3D.root
 - data/runs/recodata_run4/reco_run49019_3D.root
-- data/runs/recodata_run4/reco_run49952_3D.root
 - data/runs/recodata_run4/reco_run52812_3D.root
+15.0, 0.909, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run49952_3D.root
 - data/runs/recodata_run4/reco_run52859_3D.root
 - data/runs/recodata_run4/reco_run52878_3D.root
-- data/runs/recodata_run4/reco_run53704_3D.root
 - data/runs/recodata_run4/reco_run54407_3D.root
-15.0, 0.916, 21.1:
-- data/runs/recodata_run4/reco_run45637_3D.root
+15.0, 0.909, 21.4, 1.7:
+- data/runs/recodata_run4/reco_run53704_3D.root
+15.0, 0.916, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46737_3D.root
 - data/runs/recodata_run4/reco_run46789_3D.root
 - data/runs/recodata_run4/reco_run46908_3D.root
@@ -66,90 +75,105 @@
 - data/runs/recodata_run4/reco_run48755_3D.root
 - data/runs/recodata_run4/reco_run48902_3D.root
 - data/runs/recodata_run4/reco_run52660_3D.root
-15.0, 0.916, 21.4:
+15.0, 0.916, 21.1, 1.7:
+- data/runs/recodata_run4/reco_run45637_3D.root
+15.0, 0.916, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43498_3D.root
-- data/runs/recodata_run4/reco_run43505_3D.root
 - data/runs/recodata_run4/reco_run43638_3D.root
 - data/runs/recodata_run4/reco_run43735_3D.root
 - data/runs/recodata_run4/reco_run45206_3D.root
-- data/runs/recodata_run4/reco_run45415_3D.root
+- data/runs/recodata_run4/reco_run54545_3D.root
+- data/runs/recodata_run4/reco_run54645_3D.root
+- data/runs/recodata_run4/reco_run55097_3D.root
+15.0, 0.916, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43505_3D.root
 - data/runs/recodata_run4/reco_run47803_3D.root
+15.0, 0.916, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run45415_3D.root
 - data/runs/recodata_run4/reco_run52921_3D.root
 - data/runs/recodata_run4/reco_run52980_3D.root
 - data/runs/recodata_run4/reco_run52999_3D.root
 - data/runs/recodata_run4/reco_run53038_3D.root
-- data/runs/recodata_run4/reco_run54545_3D.root
-- data/runs/recodata_run4/reco_run54645_3D.root
-- data/runs/recodata_run4/reco_run55097_3D.root
-15.0, 0.924, 21.1:
-- data/runs/recodata_run4/reco_run46070_3D.root
+15.0, 0.924, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46228_3D.root
 - data/runs/recodata_run4/reco_run46385_3D.root
 - data/runs/recodata_run4/reco_run46542_3D.root
 - data/runs/recodata_run4/reco_run46632_3D.root
-15.0, 0.924, 21.4:
+15.0, 0.924, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run46070_3D.root
+15.0, 0.924, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43257_3D.root
 - data/runs/recodata_run4/reco_run43312_3D.root
 - data/runs/recodata_run4/reco_run45045_3D.root
+15.0, 0.924, 21.4, 1.7:
 - data/runs/recodata_run4/reco_run45255_3D.root
-25.0, 0.894, 21.1:
+25.0, 0.894, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47346_3D.root
-25.0, 0.894, 21.4:
+25.0, 0.894, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43527_3D.root
 - data/runs/recodata_run4/reco_run44371_3D.root
-25.0, 0.902, 20.1:
+25.0, 0.902, 20.1, 1.1:
 - data/runs/recodata_run4/reco_run41164_3D.root
-25.0, 0.902, 21.1:
+25.0, 0.902, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run42676_3D.root
 - data/runs/recodata_run4/reco_run47148_3D.root
+- data/runs/recodata_run4/reco_run53337_3D.root
+- data/runs/recodata_run4/reco_run53493_3D.root
+25.0, 0.902, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run50266_3D.root
 - data/runs/recodata_run4/reco_run50747_3D.root
 - data/runs/recodata_run4/reco_run53181_3D.root
-- data/runs/recodata_run4/reco_run53337_3D.root
-- data/runs/recodata_run4/reco_run53493_3D.root
-25.0, 0.902, 21.4:
-- data/runs/recodata_run4/reco_run43468_3D.root
-- data/runs/recodata_run4/reco_run43491_3D.root
-- data/runs/recodata_run4/reco_run43534_3D.root
+25.0, 0.902, 21.4, 0.9:
 - data/runs/recodata_run4/reco_run44051_3D.root
 - data/runs/recodata_run4/reco_run44207_3D.root
+25.0, 0.902, 21.4, 1.1:
+- data/runs/recodata_run4/reco_run43468_3D.root
+- data/runs/recodata_run4/reco_run43491_3D.root
 - data/runs/recodata_run4/reco_run44557_3D.root
+25.0, 0.902, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43534_3D.root
 - data/runs/recodata_run4/reco_run47501_3D.root
 - data/runs/recodata_run4/reco_run49169_3D.root
 - data/runs/recodata_run4/reco_run49337_3D.root
 - data/runs/recodata_run4/reco_run49642_3D.root
 - data/runs/recodata_run4/reco_run49791_3D.root
+25.0, 0.902, 21.4, 1.5:
 - data/runs/recodata_run4/reco_run50156_3D.root
-25.0, 0.909, 20.4:
+25.0, 0.909, 20.4, 1.3:
 - data/runs/recodata_run4/reco_run41372_3D.root
 - data/runs/recodata_run4/reco_run41543_3D.root
-25.0, 0.909, 20.7:
+25.0, 0.909, 20.7, 1.1:
 - data/runs/recodata_run4/reco_run41739_3D.root
 - data/runs/recodata_run4/reco_run41925_3D.root
-25.0, 0.909, 21.1:
+25.0, 0.909, 21.1, 1.1:
 - data/runs/recodata_run4/reco_run42121_3D.root
 - data/runs/recodata_run4/reco_run42315_3D.root
 - data/runs/recodata_run4/reco_run42468_3D.root
 - data/runs/recodata_run4/reco_run43368_3D.root
+25.0, 0.909, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47047_3D.root
+25.0, 0.909, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run47102_3D.root
 - data/runs/recodata_run4/reco_run50896_3D.root
-25.0, 0.909, 21.4:
-- data/runs/recodata_run4/reco_run42853_3D.root
+25.0, 0.909, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43853_3D.root
+25.0, 0.909, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43419_3D.root
+25.0, 0.909, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run42853_3D.root
 - data/runs/recodata_run4/reco_run43513_3D.root
 - data/runs/recodata_run4/reco_run43520_3D.root
-- data/runs/recodata_run4/reco_run43853_3D.root
-- data/runs/recodata_run4/reco_run47652_3D.root
 - data/runs/recodata_run4/reco_run49020_3D.root
-- data/runs/recodata_run4/reco_run49953_3D.root
 - data/runs/recodata_run4/reco_run52813_3D.root
+25.0, 0.909, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47652_3D.root
+- data/runs/recodata_run4/reco_run49953_3D.root
 - data/runs/recodata_run4/reco_run52856_3D.root
 - data/runs/recodata_run4/reco_run52879_3D.root
-- data/runs/recodata_run4/reco_run53705_3D.root
 - data/runs/recodata_run4/reco_run54408_3D.root
-25.0, 0.916, 21.1:
-- data/runs/recodata_run4/reco_run45638_3D.root
+25.0, 0.909, 21.4, 1.7:
+- data/runs/recodata_run4/reco_run53705_3D.root
+25.0, 0.916, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46738_3D.root
 - data/runs/recodata_run4/reco_run46790_3D.root
 - data/runs/recodata_run4/reco_run46909_3D.root
@@ -160,89 +184,104 @@
 - data/runs/recodata_run4/reco_run48756_3D.root
 - data/runs/recodata_run4/reco_run48903_3D.root
 - data/runs/recodata_run4/reco_run52661_3D.root
-25.0, 0.916, 21.4:
+25.0, 0.916, 21.1, 1.7:
+- data/runs/recodata_run4/reco_run45638_3D.root
+25.0, 0.916, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43499_3D.root
-- data/runs/recodata_run4/reco_run43506_3D.root
 - data/runs/recodata_run4/reco_run43639_3D.root
 - data/runs/recodata_run4/reco_run43736_3D.root
 - data/runs/recodata_run4/reco_run45207_3D.root
-- data/runs/recodata_run4/reco_run45416_3D.root
+- data/runs/recodata_run4/reco_run54546_3D.root
+- data/runs/recodata_run4/reco_run54646_3D.root
+- data/runs/recodata_run4/reco_run55098_3D.root
+25.0, 0.916, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43506_3D.root
 - data/runs/recodata_run4/reco_run47804_3D.root
+25.0, 0.916, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run45416_3D.root
 - data/runs/recodata_run4/reco_run52922_3D.root
 - data/runs/recodata_run4/reco_run52981_3D.root
 - data/runs/recodata_run4/reco_run53000_3D.root
 - data/runs/recodata_run4/reco_run53039_3D.root
-- data/runs/recodata_run4/reco_run54546_3D.root
-- data/runs/recodata_run4/reco_run54646_3D.root
-- data/runs/recodata_run4/reco_run55098_3D.root
-25.0, 0.924, 21.1:
-- data/runs/recodata_run4/reco_run46071_3D.root
+25.0, 0.924, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46229_3D.root
 - data/runs/recodata_run4/reco_run46386_3D.root
 - data/runs/recodata_run4/reco_run46543_3D.root
 - data/runs/recodata_run4/reco_run46633_3D.root
-25.0, 0.924, 21.4:
+25.0, 0.924, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run46071_3D.root
+25.0, 0.924, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43258_3D.root
 - data/runs/recodata_run4/reco_run43313_3D.root
 - data/runs/recodata_run4/reco_run45046_3D.root
+25.0, 0.924, 21.4, 1.7:
 - data/runs/recodata_run4/reco_run45256_3D.root
-35.0, 0.894, 21.1:
+35.0, 0.894, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47347_3D.root
-35.0, 0.894, 21.4:
+35.0, 0.894, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43528_3D.root
-35.0, 0.902, 20.1:
+35.0, 0.902, 20.1, 1.3:
 - data/runs/recodata_run4/reco_run41165_3D.root
-35.0, 0.902, 21.1:
+35.0, 0.902, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run42677_3D.root
 - data/runs/recodata_run4/reco_run47149_3D.root
-- data/runs/recodata_run4/reco_run50267_3D.root
-- data/runs/recodata_run4/reco_run50748_3D.root
 - data/runs/recodata_run4/reco_run53182_3D.root
 - data/runs/recodata_run4/reco_run53494_3D.root
-35.0, 0.902, 21.4:
-- data/runs/recodata_run4/reco_run43469_3D.root
-- data/runs/recodata_run4/reco_run43493_3D.root
-- data/runs/recodata_run4/reco_run43535_3D.root
+35.0, 0.902, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run50267_3D.root
+- data/runs/recodata_run4/reco_run50748_3D.root
+35.0, 0.902, 21.4, 0.9:
 - data/runs/recodata_run4/reco_run44052_3D.root
 - data/runs/recodata_run4/reco_run44208_3D.root
+35.0, 0.902, 21.4, 1.1:
+- data/runs/recodata_run4/reco_run43469_3D.root
 - data/runs/recodata_run4/reco_run44558_3D.root
-- data/runs/recodata_run4/reco_run47502_3D.root
+35.0, 0.902, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43493_3D.root
+- data/runs/recodata_run4/reco_run43535_3D.root
 - data/runs/recodata_run4/reco_run49170_3D.root
 - data/runs/recodata_run4/reco_run49338_3D.root
 - data/runs/recodata_run4/reco_run49643_3D.root
 - data/runs/recodata_run4/reco_run49792_3D.root
 - data/runs/recodata_run4/reco_run50157_3D.root
 - data/runs/recodata_run4/reco_run53338_3D.root
-35.0, 0.909, 20.4:
+35.0, 0.902, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47502_3D.root
+35.0, 0.909, 20.4, 1.3:
 - data/runs/recodata_run4/reco_run41373_3D.root
 - data/runs/recodata_run4/reco_run41544_3D.root
-35.0, 0.909, 20.7:
+35.0, 0.909, 20.7, 1.1:
 - data/runs/recodata_run4/reco_run41740_3D.root
 - data/runs/recodata_run4/reco_run41926_3D.root
-35.0, 0.909, 21.1:
+35.0, 0.909, 21.1, 1.1:
 - data/runs/recodata_run4/reco_run42122_3D.root
 - data/runs/recodata_run4/reco_run42316_3D.root
 - data/runs/recodata_run4/reco_run42469_3D.root
 - data/runs/recodata_run4/reco_run43369_3D.root
+35.0, 0.909, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47048_3D.root
+35.0, 0.909, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run47103_3D.root
 - data/runs/recodata_run4/reco_run50897_3D.root
-35.0, 0.909, 21.4:
-- data/runs/recodata_run4/reco_run42854_3D.root
+35.0, 0.909, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43854_3D.root
+35.0, 0.909, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43420_3D.root
+35.0, 0.909, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run42854_3D.root
 - data/runs/recodata_run4/reco_run43514_3D.root
 - data/runs/recodata_run4/reco_run43521_3D.root
-- data/runs/recodata_run4/reco_run43854_3D.root
-- data/runs/recodata_run4/reco_run47653_3D.root
 - data/runs/recodata_run4/reco_run49021_3D.root
-- data/runs/recodata_run4/reco_run49954_3D.root
 - data/runs/recodata_run4/reco_run52814_3D.root
+35.0, 0.909, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47653_3D.root
+- data/runs/recodata_run4/reco_run49954_3D.root
 - data/runs/recodata_run4/reco_run52857_3D.root
 - data/runs/recodata_run4/reco_run52880_3D.root
-- data/runs/recodata_run4/reco_run53706_3D.root
 - data/runs/recodata_run4/reco_run54409_3D.root
-35.0, 0.916, 21.1:
-- data/runs/recodata_run4/reco_run45639_3D.root
+35.0, 0.909, 21.4, 1.7:
+- data/runs/recodata_run4/reco_run53706_3D.root
+35.0, 0.916, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46739_3D.root
 - data/runs/recodata_run4/reco_run46791_3D.root
 - data/runs/recodata_run4/reco_run46910_3D.root
@@ -252,90 +291,104 @@
 - data/runs/recodata_run4/reco_run48597_3D.root
 - data/runs/recodata_run4/reco_run48757_3D.root
 - data/runs/recodata_run4/reco_run52662_3D.root
-35.0, 0.916, 21.4:
+35.0, 0.916, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run45639_3D.root
+35.0, 0.916, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43500_3D.root
-- data/runs/recodata_run4/reco_run43507_3D.root
-- data/runs/recodata_run4/reco_run43640_3D.root
 - data/runs/recodata_run4/reco_run43737_3D.root
 - data/runs/recodata_run4/reco_run45208_3D.root
-- data/runs/recodata_run4/reco_run45417_3D.root
+- data/runs/recodata_run4/reco_run54547_3D.root
+- data/runs/recodata_run4/reco_run54647_3D.root
+- data/runs/recodata_run4/reco_run55099_3D.root
+35.0, 0.916, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43507_3D.root
+- data/runs/recodata_run4/reco_run43640_3D.root
 - data/runs/recodata_run4/reco_run47805_3D.root
 - data/runs/recodata_run4/reco_run48904_3D.root
+35.0, 0.916, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run45417_3D.root
 - data/runs/recodata_run4/reco_run52923_3D.root
 - data/runs/recodata_run4/reco_run52982_3D.root
 - data/runs/recodata_run4/reco_run53001_3D.root
 - data/runs/recodata_run4/reco_run53040_3D.root
-- data/runs/recodata_run4/reco_run54547_3D.root
-- data/runs/recodata_run4/reco_run54647_3D.root
-- data/runs/recodata_run4/reco_run55099_3D.root
-35.0, 0.924, 21.1:
-- data/runs/recodata_run4/reco_run46072_3D.root
+35.0, 0.924, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46230_3D.root
 - data/runs/recodata_run4/reco_run46387_3D.root
 - data/runs/recodata_run4/reco_run46544_3D.root
 - data/runs/recodata_run4/reco_run46634_3D.root
-35.0, 0.924, 21.4:
+35.0, 0.924, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run46072_3D.root
+35.0, 0.924, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43259_3D.root
 - data/runs/recodata_run4/reco_run43314_3D.root
 - data/runs/recodata_run4/reco_run45047_3D.root
+35.0, 0.924, 21.4, 1.7:
 - data/runs/recodata_run4/reco_run45257_3D.root
-46.5, 0.894, 21.1:
+46.5, 0.894, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47348_3D.root
-46.5, 0.894, 21.4:
+46.5, 0.894, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43529_3D.root
 - data/runs/recodata_run4/reco_run44372_3D.root
-46.5, 0.902, 20.1:
+46.5, 0.902, 20.1, 1.3:
 - data/runs/recodata_run4/reco_run41166_3D.root
-46.5, 0.902, 21.1:
+46.5, 0.902, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run42678_3D.root
 - data/runs/recodata_run4/reco_run47150_3D.root
+- data/runs/recodata_run4/reco_run53495_3D.root
+46.5, 0.902, 21.1, 1.5:
 - data/runs/recodata_run4/reco_run50268_3D.root
 - data/runs/recodata_run4/reco_run50749_3D.root
 - data/runs/recodata_run4/reco_run53183_3D.root
-- data/runs/recodata_run4/reco_run53495_3D.root
-46.5, 0.902, 21.4:
-- data/runs/recodata_run4/reco_run43470_3D.root
-- data/runs/recodata_run4/reco_run43494_3D.root
-- data/runs/recodata_run4/reco_run43536_3D.root
+46.5, 0.902, 21.4, 0.9:
 - data/runs/recodata_run4/reco_run44053_3D.root
 - data/runs/recodata_run4/reco_run44209_3D.root
+46.5, 0.902, 21.4, 1.1:
+- data/runs/recodata_run4/reco_run43470_3D.root
+- data/runs/recodata_run4/reco_run43494_3D.root
 - data/runs/recodata_run4/reco_run44559_3D.root
-- data/runs/recodata_run4/reco_run47503_3D.root
+46.5, 0.902, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43536_3D.root
 - data/runs/recodata_run4/reco_run49339_3D.root
 - data/runs/recodata_run4/reco_run49644_3D.root
 - data/runs/recodata_run4/reco_run49793_3D.root
-- data/runs/recodata_run4/reco_run50158_3D.root
 - data/runs/recodata_run4/reco_run53339_3D.root
-46.5, 0.909, 20.4:
+46.5, 0.902, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47503_3D.root
+- data/runs/recodata_run4/reco_run50158_3D.root
+46.5, 0.909, 20.4, 1.3:
 - data/runs/recodata_run4/reco_run41374_3D.root
 - data/runs/recodata_run4/reco_run41545_3D.root
-46.5, 0.909, 20.7:
+46.5, 0.909, 20.7, 1.1:
 - data/runs/recodata_run4/reco_run41741_3D.root
 - data/runs/recodata_run4/reco_run41927_3D.root
-46.5, 0.909, 21.1:
+46.5, 0.909, 21.1, 1.1:
 - data/runs/recodata_run4/reco_run42123_3D.root
 - data/runs/recodata_run4/reco_run42317_3D.root
 - data/runs/recodata_run4/reco_run42470_3D.root
+46.5, 0.909, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47049_3D.root
-- data/runs/recodata_run4/reco_run47104_3D.root
 - data/runs/recodata_run4/reco_run50898_3D.root
+46.5, 0.909, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run47104_3D.root
 - data/runs/recodata_run4/reco_run50956_3D.root
-46.5, 0.909, 21.4:
-- data/runs/recodata_run4/reco_run42855_3D.root
+46.5, 0.909, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43855_3D.root
+46.5, 0.909, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43370_3D.root
 - data/runs/recodata_run4/reco_run43421_3D.root
+46.5, 0.909, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run42855_3D.root
 - data/runs/recodata_run4/reco_run43515_3D.root
 - data/runs/recodata_run4/reco_run43522_3D.root
-- data/runs/recodata_run4/reco_run43855_3D.root
-- data/runs/recodata_run4/reco_run47654_3D.root
 - data/runs/recodata_run4/reco_run49022_3D.root
-- data/runs/recodata_run4/reco_run49955_3D.root
 - data/runs/recodata_run4/reco_run52815_3D.root
+46.5, 0.909, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47654_3D.root
+- data/runs/recodata_run4/reco_run49955_3D.root
 - data/runs/recodata_run4/reco_run52858_3D.root
 - data/runs/recodata_run4/reco_run52881_3D.root
 - data/runs/recodata_run4/reco_run54410_3D.root
-46.5, 0.916, 21.1:
-- data/runs/recodata_run4/reco_run45640_3D.root
+46.5, 0.916, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46740_3D.root
 - data/runs/recodata_run4/reco_run46792_3D.root
 - data/runs/recodata_run4/reco_run46911_3D.root
@@ -346,90 +399,106 @@
 - data/runs/recodata_run4/reco_run48758_3D.root
 - data/runs/recodata_run4/reco_run48905_3D.root
 - data/runs/recodata_run4/reco_run52663_3D.root
-46.5, 0.916, 21.4:
+46.5, 0.916, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run45640_3D.root
+46.5, 0.916, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run45209_3D.root
+46.5, 0.916, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43501_3D.root
+- data/runs/recodata_run4/reco_run43738_3D.root
+- data/runs/recodata_run4/reco_run54548_3D.root
+- data/runs/recodata_run4/reco_run54648_3D.root
+- data/runs/recodata_run4/reco_run55100_3D.root
+46.5, 0.916, 21.4, 1.3:
 - data/runs/recodata_run4/reco_run43508_3D.root
 - data/runs/recodata_run4/reco_run43641_3D.root
-- data/runs/recodata_run4/reco_run43738_3D.root
-- data/runs/recodata_run4/reco_run45209_3D.root
-- data/runs/recodata_run4/reco_run45418_3D.root
 - data/runs/recodata_run4/reco_run47806_3D.root
+46.5, 0.916, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run45418_3D.root
 - data/runs/recodata_run4/reco_run52924_3D.root
 - data/runs/recodata_run4/reco_run52983_3D.root
 - data/runs/recodata_run4/reco_run53002_3D.root
 - data/runs/recodata_run4/reco_run53041_3D.root
-- data/runs/recodata_run4/reco_run54548_3D.root
-- data/runs/recodata_run4/reco_run54648_3D.root
-- data/runs/recodata_run4/reco_run55100_3D.root
-46.5, 0.924, 21.1:
-- data/runs/recodata_run4/reco_run46073_3D.root
+46.5, 0.924, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46231_3D.root
 - data/runs/recodata_run4/reco_run46388_3D.root
 - data/runs/recodata_run4/reco_run46545_3D.root
 - data/runs/recodata_run4/reco_run46635_3D.root
-46.5, 0.924, 21.4:
+46.5, 0.924, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run46073_3D.root
+46.5, 0.924, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43260_3D.root
 - data/runs/recodata_run4/reco_run43315_3D.root
 - data/runs/recodata_run4/reco_run45048_3D.root
+46.5, 0.924, 21.4, 1.7:
 - data/runs/recodata_run4/reco_run45258_3D.root
-5.0, 0.894, 21.1:
+5.0, 0.894, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run47344_3D.root
-5.0, 0.894, 21.4:
+5.0, 0.894, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43525_3D.root
 - data/runs/recodata_run4/reco_run44369_3D.root
-5.0, 0.902, 20.1:
+5.0, 0.902, 20.1, 1.3:
 - data/runs/recodata_run4/reco_run41162_3D.root
-5.0, 0.902, 21.1:
+5.0, 0.902, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run42674_3D.root
 - data/runs/recodata_run4/reco_run47146_3D.root
-- data/runs/recodata_run4/reco_run50264_3D.root
-- data/runs/recodata_run4/reco_run50745_3D.root
 - data/runs/recodata_run4/reco_run53179_3D.root
 - data/runs/recodata_run4/reco_run53491_3D.root
-5.0, 0.902, 21.4:
-- data/runs/recodata_run4/reco_run43466_3D.root
-- data/runs/recodata_run4/reco_run43489_3D.root
-- data/runs/recodata_run4/reco_run43532_3D.root
+5.0, 0.902, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run50264_3D.root
+- data/runs/recodata_run4/reco_run50745_3D.root
+5.0, 0.902, 21.4, 0.9:
 - data/runs/recodata_run4/reco_run44049_3D.root
 - data/runs/recodata_run4/reco_run44205_3D.root
+5.0, 0.902, 21.4, 1.1:
+- data/runs/recodata_run4/reco_run43466_3D.root
+- data/runs/recodata_run4/reco_run43489_3D.root
 - data/runs/recodata_run4/reco_run44555_3D.root
-- data/runs/recodata_run4/reco_run47499_3D.root
+5.0, 0.902, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run43532_3D.root
 - data/runs/recodata_run4/reco_run49167_3D.root
 - data/runs/recodata_run4/reco_run49335_3D.root
 - data/runs/recodata_run4/reco_run49640_3D.root
 - data/runs/recodata_run4/reco_run49789_3D.root
-- data/runs/recodata_run4/reco_run50154_3D.root
 - data/runs/recodata_run4/reco_run53335_3D.root
-5.0, 0.909, 20.4:
+5.0, 0.902, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47499_3D.root
+- data/runs/recodata_run4/reco_run50154_3D.root
+5.0, 0.909, 20.4, 1.3:
 - data/runs/recodata_run4/reco_run41370_3D.root
 - data/runs/recodata_run4/reco_run41541_3D.root
-5.0, 0.909, 20.7:
+5.0, 0.909, 20.7, 1.1:
 - data/runs/recodata_run4/reco_run41737_3D.root
 - data/runs/recodata_run4/reco_run41923_3D.root
-5.0, 0.909, 21.1:
+5.0, 0.909, 21.1, 1.1:
 - data/runs/recodata_run4/reco_run42119_3D.root
 - data/runs/recodata_run4/reco_run42313_3D.root
 - data/runs/recodata_run4/reco_run42466_3D.root
+5.0, 0.909, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run43366_3D.root
 - data/runs/recodata_run4/reco_run47045_3D.root
-- data/runs/recodata_run4/reco_run47100_3D.root
 - data/runs/recodata_run4/reco_run50894_3D.root
-5.0, 0.909, 21.4:
-- data/runs/recodata_run4/reco_run42851_3D.root
+5.0, 0.909, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run47100_3D.root
+5.0, 0.909, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43851_3D.root
+5.0, 0.909, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43417_3D.root
+5.0, 0.909, 21.4, 1.3:
+- data/runs/recodata_run4/reco_run42851_3D.root
 - data/runs/recodata_run4/reco_run43511_3D.root
 - data/runs/recodata_run4/reco_run43518_3D.root
-- data/runs/recodata_run4/reco_run43851_3D.root
-- data/runs/recodata_run4/reco_run47650_3D.root
 - data/runs/recodata_run4/reco_run49018_3D.root
-- data/runs/recodata_run4/reco_run49951_3D.root
 - data/runs/recodata_run4/reco_run52811_3D.root
+5.0, 0.909, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run47650_3D.root
+- data/runs/recodata_run4/reco_run49951_3D.root
 - data/runs/recodata_run4/reco_run52860_3D.root
 - data/runs/recodata_run4/reco_run52877_3D.root
-- data/runs/recodata_run4/reco_run53703_3D.root
 - data/runs/recodata_run4/reco_run54406_3D.root
-5.0, 0.916, 21.1:
-- data/runs/recodata_run4/reco_run45636_3D.root
+5.0, 0.909, 21.4, 1.7:
+- data/runs/recodata_run4/reco_run53703_3D.root
+5.0, 0.916, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46736_3D.root
 - data/runs/recodata_run4/reco_run46788_3D.root
 - data/runs/recodata_run4/reco_run46907_3D.root
@@ -438,31 +507,38 @@
 - data/runs/recodata_run4/reco_run48338_3D.root
 - data/runs/recodata_run4/reco_run48594_3D.root
 - data/runs/recodata_run4/reco_run48754_3D.root
-5.0, 0.916, 21.4:
+5.0, 0.916, 21.1, 1.7:
+- data/runs/recodata_run4/reco_run45636_3D.root
+5.0, 0.916, 21.4, 0.9:
+- data/runs/recodata_run4/reco_run43734_3D.root
+5.0, 0.916, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43497_3D.root
+- data/runs/recodata_run4/reco_run45205_3D.root
+- data/runs/recodata_run4/reco_run54544_3D.root
+- data/runs/recodata_run4/reco_run54644_3D.root
+- data/runs/recodata_run4/reco_run55096_3D.root
+5.0, 0.916, 21.4, 1.3:
 - data/runs/recodata_run4/reco_run43504_3D.root
 - data/runs/recodata_run4/reco_run43637_3D.root
-- data/runs/recodata_run4/reco_run43734_3D.root
-- data/runs/recodata_run4/reco_run45205_3D.root
-- data/runs/recodata_run4/reco_run45414_3D.root
 - data/runs/recodata_run4/reco_run47802_3D.root
 - data/runs/recodata_run4/reco_run48901_3D.root
 - data/runs/recodata_run4/reco_run52659_3D.root
+5.0, 0.916, 21.4, 1.5:
+- data/runs/recodata_run4/reco_run45414_3D.root
 - data/runs/recodata_run4/reco_run52920_3D.root
 - data/runs/recodata_run4/reco_run52979_3D.root
 - data/runs/recodata_run4/reco_run52998_3D.root
 - data/runs/recodata_run4/reco_run53037_3D.root
-- data/runs/recodata_run4/reco_run54544_3D.root
-- data/runs/recodata_run4/reco_run54644_3D.root
-- data/runs/recodata_run4/reco_run55096_3D.root
-5.0, 0.924, 21.1:
-- data/runs/recodata_run4/reco_run46069_3D.root
-- data/runs/recodata_run4/reco_run46227_3D.root
+5.0, 0.924, 21.1, 1.3:
 - data/runs/recodata_run4/reco_run46384_3D.root
 - data/runs/recodata_run4/reco_run46541_3D.root
 - data/runs/recodata_run4/reco_run46631_3D.root
-5.0, 0.924, 21.4:
+5.0, 0.924, 21.1, 1.5:
+- data/runs/recodata_run4/reco_run46069_3D.root
+- data/runs/recodata_run4/reco_run46227_3D.root
+5.0, 0.924, 21.4, 1.1:
 - data/runs/recodata_run4/reco_run43256_3D.root
 - data/runs/recodata_run4/reco_run43311_3D.root
 - data/runs/recodata_run4/reco_run45044_3D.root
+5.0, 0.924, 21.4, 1.7:
 - data/runs/recodata_run4/reco_run45254_3D.root

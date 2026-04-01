@@ -108,12 +108,13 @@ if __name__ == "__main__":
         ztrueV  = float(dictionary["data_inputs"]["ztrue_ref"])
         PV      = float(dictionary["data_inputs"]["P_ref"])
         TV      = float(dictionary["data_inputs"]["T_ref"])
+        HV      = float(dictionary["data_inputs"]["H_ref"])
         ZV      = ztrueV   # float(dictionary["data_inputs"]["Z_ref"])
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
      
         # remove the validation case from the training datasets and add it to a separate dic
-        print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T) = ({ZV},{PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
+        print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T,H) = ({ZV},{PV},{TV},{HV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
 
         source_key_V = (ztrueV,alphaV,lambdaV)
         if source_key_V in source_data:
@@ -121,7 +122,7 @@ if __name__ == "__main__":
         else:
             print(f"Warning, the element {source_key_V} is not among the simulation datasets")
      
-        target_key_V = (ZV,PV,TV)
+        target_key_V = (ZV,PV,TV,HV)
         if target_key_V in target_data:
             val_data = target_data.pop(target_key_V,None)
         else:
@@ -183,10 +184,11 @@ if __name__ == "__main__":
         ztrue0=dictionary["data_inputs"]["ztrue_val"]
         P0=dictionary["data_inputs"]["P_val"]
         T0=dictionary["data_inputs"]["T_val"]
+        H0=dictionary["data_inputs"]["H_val"]
         Z0=ztrue0
 
         src_key_0 = (ztrue0,alpha0,lambda0)
-        tgt_key_0 = (Z0,P0,T0)
+        tgt_key_0 = (Z0,P0,T0,H0)
 
         # dataframe -> torch tensors conversion
         A_sim_df  = source_data[src_key_0]
@@ -281,10 +283,10 @@ if __name__ == "__main__":
                 if ival%500!=0: continue
                 print(f"Validating combination # {ival} ...")
                 
-                _,P,T = data_k
+                _,P,T,H = data_k
 
                 src_key_0 = (Z,Alpha,Lambda)
-                tgt_key_0 = (Z,P,T)
+                tgt_key_0 = (Z,P,T,H)
 
                 # the Z is taken from sim, but it can be that the corresponding key in data is absent (not processed, not taken, etc)
                 if tgt_key_0 not in target_data:
@@ -332,8 +334,8 @@ if __name__ == "__main__":
                 
                 # --- CREAZIONE VALIDATOR --- #
                 path_to_plots = "./plot/validation_plots/"
-                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}"
-                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T}
+                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}-H{H}"
+                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T, "H_val": H}
                 
                 plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=params, doratio=False, suffix=suffix)
                 if len(variables)>1:
