@@ -117,12 +117,14 @@ if __name__ == "__main__":
         print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T,H) = ({ZV},{PV},{TV},{HV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
 
         source_key_V = (ztrueV,alphaV,lambdaV)
+        source_key_varnames = ["z","alpha","lambda"] # this is only to save them in the output file to make coherent inference
         if source_key_V in source_data:
             val_sim = source_data.pop(source_key_V,None)
         else:
             print(f"Warning, the element {source_key_V} is not among the simulation datasets")
      
         target_key_V = (ZV,PV,TV,HV)
+        target_key_varnames = ["P","T","H"] # this is only to save them in the output file to make coherent inference
         if target_key_V in target_data:
             val_data = target_data.pop(target_key_V,None)
         else:
@@ -142,12 +144,11 @@ if __name__ == "__main__":
             device=device
         )
 
-        # context configuration
-        raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
-        raw_context_dim += len(variables) # add 1 latent noise to each variable in the context
+        # context variables to store
+        context_varnames = source_key_varnames + target_key_varnames + ["latent_noise"]
         
         # build the flow and train it
-        corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,raw_context_dim)
+        corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,context_varnames)
 
         corrections.setup_flow()
         corrections.set_validation_case(val_case)
@@ -173,7 +174,9 @@ if __name__ == "__main__":
         flow, context_encoder, meta = load_model(checkpoint_path, device=device)
         print("Modello caricato!")
         print("Step migliore:", meta.get("best_step"))
-        print("Val MMD:", meta.get("best_val_mmd"))
+        print("Variables used:", meta.get("variables"))
+        print("Context variables used:", meta.get("context_variables"))
+        print("sigma latent used:", meta.get("sigma_latent"))
 
         # --- ESEMPIO: generiamo un caso di validazione per una coppia (x,y) ---
         # seleziona uno xy di validazione
@@ -201,7 +204,8 @@ if __name__ == "__main__":
         tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
         tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
         raw_context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).expand(A_sim.shape[0],-1)        
-        sigma_latent = dictionary[conf]["sigma_latent"]
+        sigma_latent = meta.get("sigma_latent")
+        
         if standardize:
             A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
             A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
@@ -304,7 +308,7 @@ if __name__ == "__main__":
                 tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
                 tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
                 raw_context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).expand(A_sim.shape[0],-1)        
-                sigma_latent = dictionary[conf]["sigma_latent"]
+                sigma_latent = meta.get("sigma_latent")
                 if standardize:
                     A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
                     A_data_scaled,mu_data,std_data = standardize_dataset(A_data)

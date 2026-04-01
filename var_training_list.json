@@ -8,6 +8,7 @@
 	"sc_xmean",
 	"sc_ymean",
 	"sc_width",
-	"sc_length"
+	"sc_length",
+	"sc_rms"
     ]
 }

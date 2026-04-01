@@ -44,6 +44,7 @@ class ConditionalAffineCoupling(nn.Module):
 
         # log_scale_factor per dare respiro alla varianza
         self.rescale_s = nn.Parameter(torch.ones(self.dim_unmasked))
+        self.noise_gate = nn.Parameter(torch.zeros(1)) # all'inizio del training e' zero
 
     def forward(self, x, context=None):
         """
@@ -527,10 +528,11 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
 
 class SimulationCorrection():
 
-    def __init__(self, configuration, conf_dic, dataset, standardize, encoder_input_dim):
+    def __init__(self, configuration, conf_dic, dataset, standardize,context_variables):
 
         # Name of the variables used as conditions and during training
         self.dataset = dataset
+        self.variables = dataset.variables
         self.standardize = standardize
         
         # Checking if cuda is avaliable
@@ -538,7 +540,8 @@ class SimulationCorrection():
         device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
         self.device = device
 
-        self.encoder_input_dim = encoder_input_dim
+        self.encoder_context_variables = context_variables
+        self.encoder_input_dim = len(context_variables) + len(self.variables) - 1 # context variables - latent noise + variables
         self.encoder_hidden_dim = conf_dic["encoder_hidden_dim"]
         self.encoder_output_dim = conf_dic["encoder_output_dim"]
         self.encoder_n_layers = conf_dic["encoder_n_layers"]
@@ -866,7 +869,14 @@ class SimulationCorrection():
                         "context_config": self.context_encoder.get_config(),
                         "best_step": step,
                         "best_val_total_loss": best_val_total_loss,
-                        "lambda_mom": self.lambda_mom
+                        "lambda_mom": self.lambda_mom,
+                        "lambda_logstd": self.lambda_logstd,
+                        "lambda_var": self.lambda_var,
+                        "lambda_mean_anchor": self.lambda_mean_anchor,
+                        "lambda_cov": self.lambda_cov,
+                        "sigma_latent": self.sigma_latent,
+                        "variables": self.variables,
+                        "context_variables": self.encoder_context_variables,
                     }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
                 
                     print(f"  ✓ new best model at step {step} (val total loss {val_total_loss:.4f})")

@@ -13,13 +13,16 @@ import os
 var_list = ["sc_integral",
             "sc_tgausssigma",
             "sc_nhits",
-            "sc_width"]
+            "sc_width",
+            "sc_length",
+            "sc_rms"]
 
 var_titles = {"sc_integral"    : "light integral [counts]",
               "sc_tgausssigma" : "$\sigma_{t}$ [pix]",
               "sc_nhits"       : "$n_{hits}$ [counts]",
               "sc_width"       : "width [pix]",
               "sc_length"      : "length [pix]",
+              "sc_rms"         : "s.d. [pix]",
               }
 
 
@@ -81,19 +84,7 @@ def plott_noratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None
     ax.set_ylim(0, 1.15*ax.get_ylim()[1])
     ax.tick_params(labelsize=22)
 
-    if( "integral" in str(xlabel)  ):
-        xlabel_new = "light integral [counts]"
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'$\sigma_{t}$ [pix]'
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "nhits" in str(xlabel)  ):
-        xlabel_new = r'n_{hits}'
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    else:
-        xlabel_new = xlabel.replace("sc_", "")
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    
+    ax.set_xlabel(var_titles[xlabel], fontsize=26)
     ax.tick_params(labelsize=24)
 
     # Create a custom legend handle to show a line
@@ -174,19 +165,7 @@ def plott_ratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None):
     ax[0].set_ylim(0, 1.15*ax[0].get_ylim()[1])
     ax[0].tick_params(labelsize=22)
 
-    if( "integral" in str(xlabel)  ):
-        xlabel_new = "light integral [counts]"
-        ax[0].set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'$\sigma_{t}$ [pix]'
-        ax[0].set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "nhits" in str(xlabel)  ):
-        xlabel_new = r'n_{hits}'
-        ax[0].set_xlabel( str(xlabel_new) , fontsize=26)
-    else:
-        xlabel_new = xlabel.replace("sc_", "")
-        ax[0].set_xlabel( str(xlabel_new) , fontsize=26)
-    
+    ax.set_xlabel(var_titles[xlabel], fontsize=26)
     ax[0].tick_params(labelsize=24)
     ax[1].set_ylim(0.79, 1.21)
 
