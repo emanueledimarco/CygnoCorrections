@@ -1,0 +1,8 @@
+{
+    "var_scalar_list": [
+	"sc_integral",
+	"sc_rms",
+	"sc_length",
+	"sc_width"
+    ]
+}

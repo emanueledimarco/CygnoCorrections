@@ -1,155 +1,115 @@
 # Loads and treat the reconstruction tree data and simulation
 # test basic plotting with python -m data_reading.read_data 
 
-
+import os
+import pickle
 import uproot
 import awkward as ak
 import pandas as pd
 import numpy as np
+import json
+from collections import defaultdict
 
-from data_reading.read_data import perform_cluster_selection
+import yaml
+from yaml import Loader
+import json
+import hashlib
 
-def build_cluster_dataframe(
-    data_files,
-    branches_scalar,
-    isdata=False
-):
-    """
-    Costruisce un dataframe:
-    una riga = un cluster
+from data_reading.cluster import *
 
-    Parameters
-    ----------
-    data_files : list[str]
-        Lista file ROOT
+selection_cfg = {
+    "integral_min": 2000,
+    "integral_max": 50000,
+    "x_min": 500,
+    "x_max": 2000,
+    "y_min": 500,
+    "y_max": 2000,
+    "min_npix": 5
+}
 
-    branches_scalar : list[str]
-        Variabili scalari per cluster
-        es:
-        [
-            "sc_integral",
-            "sc_xmean",
-            "sc_ymean",
-            "sc_rms"
-        ]
+def read_data(conf,usecache=False,onlycache=False):
 
-    Returns
-    -------
-    pd.DataFrame
-    """
+    #loop to read over network condigurations from the yaml file: - one way to do hyperparameter optimization
+    stream = open("flow_configuration.yaml", 'r')
+    dictionary = yaml.load(stream,Loader)
 
-    # branches necessarie per i pixel
-    pixel_branches = [
-        "nSc",
-        "sc_redpixIdx",
-        "redpix_ix",
-        "redpix_iy",
-        "redpix_iz",
-    ]
+    with open("cluster_training_list.json", "r") as file:
+        json_data = json.load(file)
+        
+    variables = json_data["var_scalar_list"]
+    print("List of the veriables used in the flow for selection/validation:   ", variables)
+    
+    print(f"Now filling the datasets for the simulation and data. It applies the selection and converts them to panda DFs.  Since many files are involved, it takes time...")
 
-    branches = branches_scalar + pixel_branches
+    cachedir = "data/cache"
+    if not usecache:
+        sim_clusters_dict = defaultdict(list)
+        data_clusters_dict = defaultdict(list)
+     
+        sim_map  = dictionary["data_inputs"]["sim_map"]
+        data_map = dictionary["data_inputs"]["data_map"]
+     
+        maps = dict(zip(["sim","data"],[sim_map,data_map]))
+        for k,m in maps.items():
+           with open(m) as f:
+                raw_map_dic = yaml.safe_load(f)
+                map_dic = {tuple(map(float, k.split(","))): v for k, v in raw_map_dic.items()}
+                #print(map_dic)
+                if k=="sim":
+                    print("\t==> Simulation now...")
+                    for mapkey,files in map_dic.items():
+                        sim_clusters_dict[mapkey] = build_dataset_from_files(files, variables, mapkey, isdata=False)
+                        break
+                else:
+                    print("\t==> Data now...")
+                    for mapkey,files in map_dic.items():
+                        data_clusters_dict[mapkey] = build_dataset_from_files(files, variables, mapkey, isdata=True, selection_cfg=selection_cfg)
+                        break
 
-    rows = []
+        # save some metadata information
+        metadata = {
+            "version": conf,
+            "description": "CYGNO cluster dataset for sim-data shape translation",
+            
+        }
+        metadata["features"] = {
+            "pix": ["x_centered", "y_centered", "charge"],
+            "scalars": variables
+        }
 
-    for data_file in data_files:
+        metadata["conditioning"] = {
+            "sim": ["alpha", "lambda", "z"],
+            "data": ["P", "T", "z"],
+            "shared_latent": ["z"]
+        }
 
-        print(f"Reading {data_file}")
+        metadata["stats"] = {
+            "n_clusters_sim": sum(len(v) for v in sim_clusters_dict.values()),
+            "n_clusters_data": sum(len(v) for v in data_clusters_dict.values()),
+        }
 
-        with uproot.open(data_file) as f:
+        metadata["keys"] = {
+            "sim_keys": list(sim_clusters_dict.keys()),
+            "data_keys": list(data_clusters_dict.keys()),
+        }
 
-            tree = f["Events"]
+        metadata["dataset_hash"] = hashlib.md5(str(metadata).encode()).hexdigest()
 
-            arrays = tree.arrays(
-                branches,
-                library="ak"
-            )
+        dataset_bundle = {
+            "data": data_clusters_dict,
+            "sim": sim_clusters_dict,
+            "metadata": metadata
+        }
+        
+        os.makedirs(cachedir, exist_ok=True)
+        with open(f"{cachedir}/cygno_clusters_dataset.pkl", "wb") as f:
+            pickle.dump(dataset_bundle, f, protocol=4)
+        
+        if onlycache:
+            print("Exiting after caching. Now run without --onlycache")
+            exit(0)
 
-            # tua selezione cluster
-            arrays_sel = perform_cluster_selection(
-                arrays,
-                isdata
-            )
-
-            n_events = len(arrays_sel["nSc"])
-
-            for iev in range(n_events):
-
-                nsc = arrays_sel["nSc"][iev]
-
-                if nsc == 0:
-                    continue
-
-                redpix_idx = arrays_sel[
-                    "sc_redpixIdx"
-                ][iev]
-
-                redpix_ix = arrays_sel[
-                    "redpix_ix"
-                ][iev]
-
-                redpix_iy = arrays_sel[
-                    "redpix_iy"
-                ][iev]
-
-                redpix_iz = arrays_sel[
-                    "redpix_iz"
-                ][iev]
-
-                # loop sui cluster evento
-                for isc in range(nsc):
-
-                    start = int(redpix_idx[isc])
-
-                    if isc < nsc - 1:
-                        stop = int(
-                            redpix_idx[isc + 1]
-                        )
-                    else:
-                        stop = len(redpix_ix)
-
-                    pix_x = np.asarray(
-                        redpix_ix[start:stop]
-                    )
-
-                    pix_y = np.asarray(
-                        redpix_iy[start:stop]
-                    )
-
-                    pix_z = np.asarray(
-                        redpix_iz[start:stop]
-                    )
-
-                    row = {
-
-                        # metadata
-                        "event_idx": iev,
-                        "cluster_idx": isc,
-
-                        # sparse cluster
-                        "pix_x": pix_x,
-                        "pix_y": pix_y,
-                        "pix_z": pix_z,
-                    }
-
-                    # aggiungi scalari
-                    for var in branches_scalar:
-
-                        val = arrays_sel[var][iev]
-
-                        # cluster-wise variable
-                        if isinstance(
-                            val,
-                            (ak.Array, list)
-                        ):
-
-                            row[var] = val[isc]
-
-                        else:
-                            # event-wise variable
-                            row[var] = val
-
-                    rows.append(row)
-
-    df = pd.DataFrame(rows)
-
-    return df
+    else:
+        print(f"Reading source_data and target_data from pre-selected Panda DFs in {cachedir}")
+        #source_data = pd.read_pickle(f"{cachedir}/source_data.pkl")
+        #target_data = pd.read_pickle(f"{cachedir}/target_data.pkl")
