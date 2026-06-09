@@ -15,13 +15,46 @@ class Cluster:
     def n_pixels(self):
         return len(self.pix)
 
+    def to_image(self, image_size=64):
+
+        img = np.zeros(
+            (image_size, image_size),
+            dtype=np.float32
+        )
+     
+        center = image_size // 2
+     
+        x = np.round(self.pix[:, 0]).astype(int)
+        y = np.round(self.pix[:, 1]).astype(int)
+        q = self.pix[:, 2]
+     
+        x += center
+        y += center
+     
+        valid = (
+            (x >= 0)
+            & (x < image_size)
+            & (y >= 0)
+            & (y < image_size)
+        )
+     
+        x = x[valid]
+        y = y[valid]
+        q = q[valid]
+     
+        img[y, x] += q
+     
+        return img
+
 def select_cluster(c, selection_cfg):
 
+    #print (f"Going to make selection on cluster with int = {c.integral}, xmean = {c.xmean}, ymean = {c.ymean}, npix = {c.n_pixels()}, nhits = {c.nhits}")
     return (
         selection_cfg["integral_min"] < c.integral < selection_cfg["integral_max"]
-        and selection_cfg["x_min"] < c.pix[:,0].mean() < selection_cfg["x_max"]
-        and selection_cfg["y_min"] < c.pix[:,1].mean() < selection_cfg["y_max"]
+        and selection_cfg["x_min"] < c.xmean < selection_cfg["x_max"]
+        and selection_cfg["y_min"] < c.ymean < selection_cfg["y_max"]
         and c.n_pixels() > selection_cfg["min_npix"]
+        and c.nhits > selection_cfg["n_hits"]
     )
 
 def build_clusters_from_event(
@@ -131,6 +164,7 @@ def build_clusters_from_root_file(
     selection_cfg=None
 ):
 
+    print (f"Will open the rootfile {root_file}")
     f = uproot.open(root_file)
     tree = f["Events"]
 

@@ -3,6 +3,9 @@
 	"sc_integral",
 	"sc_rms",
 	"sc_length",
-	"sc_width"
+	"sc_width",
+	"sc_xmean",
+	"sc_ymean",
+	"sc_nhits"
     ]
 }
