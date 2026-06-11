@@ -56,7 +56,7 @@ def read_data_and_save(conf):
     
     maps = dict(zip(["sim","data"],[sim_map,data_map]))
     for k,m in maps.items():
-       with open(m) as f:
+        with open(m) as f:
             raw_map_dic = yaml.safe_load(f)
             map_dic = {tuple(map(float, k.split(","))): v for k, v in raw_map_dic.items()}
             #print(map_dic)
