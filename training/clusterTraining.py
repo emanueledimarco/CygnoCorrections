@@ -434,6 +434,67 @@ def image_to_scalars(img):
     ], dim=-1)
 
 
+def spatial_gradient_loss(pred, target):
+
+    # pred: [B, N, H, W]
+    # target: [B, N, H, W]
+
+    B, N, H, W = pred.shape
+
+    pred = pred.view(B*N, 1, H, W)
+    target = target.view(B*N, 1, H, W)
+
+    dx_pred = pred[..., :, 1:] - pred[..., :, :-1]
+    dy_pred = pred[..., 1:, :] - pred[..., :-1, :]
+
+    dx_tgt = target[..., :, 1:] - target[..., :, :-1]
+    dy_tgt = target[..., 1:, :] - target[..., :-1, :]
+
+    loss = (
+        (dx_pred - dx_tgt).pow(2).mean()
+        +
+        (dy_pred - dy_tgt).pow(2).mean()
+    )
+
+    return loss
+
+def total_variation(x):
+
+    dx = x[..., :, 1:] - x[..., :, :-1]
+    dy = x[..., 1:, :] - x[..., :-1, :]
+
+    return dx.abs().mean() + dy.abs().mean()
+
+
+def get_laplacian_kernel(device, dtype):
+    k = torch.tensor([[0,  1, 0],
+                      [1, -4, 1],
+                      [0,  1, 0]], device=device, dtype=dtype)
+    return k
+
+def laplacian_smoothness(x):
+    """
+    x: [B, C, H, W]  (C = n_clusters)
+    """
+
+    B, C, H, W = x.shape
+
+    kernel = get_laplacian_kernel(x.device, x.dtype)
+
+    # [C, 1, 3, 3] -> depthwise
+    kernel = kernel.view(1, 1, 3, 3).repeat(C, 1, 1, 1)
+
+    lap = F.conv2d(
+        x,
+        kernel,
+        padding=1,
+        groups=C
+    )
+
+    # smoothness scalar
+    return lap.pow(2).mean()
+
+
 # === COMPLETE LOSS FUNCTION ===
 # A) distribution matching
 # B) physics loss
@@ -446,6 +507,12 @@ def compute_cygno_loss(
     delta_h
 ):
 
+    # clamp of the intensity
+    pred = F.softplus(pred)
+    
+    pred_n = pred / (pred.sum(dim=(-1,-2), keepdim=True) + 1e-8)
+    data_n = data / (data.sum(dim=(-1,-2), keepdim=True) + 1e-8)
+    
     # --------------------------------
     # MMD-like feature matching
     # --------------------------------
@@ -459,17 +526,17 @@ def compute_cygno_loss(
 
         ], dim=-1)
 
-    pred_feat = features(pred)
-    data_feat = features(data)
+    pred_n_feat = features(pred_n)
+    data_n_feat = features(data_n)
 
     L_mmd = (
-        pred_feat.mean(0)
+        pred_n_feat.mean(0)
         -
-        data_feat.mean(0)
+        data_n_feat.mean(0)
     ).pow(2).mean()
 
     # normalize to the number of elements
-    L_mmd = L_mmd / pred.shape[0]
+    L_mmd = L_mmd / pred_n.shape[0]
     
     # --------------------------------
     # physics constraints
@@ -490,15 +557,15 @@ def compute_cygno_loss(
 
     # normalize to the number of elements
     L_integral = L_integral / pred.numel()
+
+    pred_rms = torch.sqrt(
+        (pred ** 2).mean(dim=(-1,-2))
+    )
+
+    data_rms = torch.sqrt(
+        (data ** 2).mean(dim=(-1,-2))
+    )
     
-    pred_rms = pred.std(
-        dim=(-1, -2)
-    )
-
-    data_rms = data.std(
-        dim=(-1, -2)
-    )
-
     L_rms = (
         pred_rms
         -
@@ -529,30 +596,53 @@ def compute_cygno_loss(
         delta_h.pow(2)
     ).mean()
 
+    
+    # --------------------------------
+    # spatial loss
+    # --------------------------------
+    L_spatial = spatial_gradient_loss(
+        pred_n,
+        data_n
+    )
+
+    # ------------------------------------------------------------
+    # total variation loss and smoothness (to reduce pixels jumps)
+    # ------------------------------------------------------------
+    L_tv = total_variation(pred)
+    L_lap = laplacian_smoothness(pred)
+    
     # --------------------------------
     # final weighted loss
     # --------------------------------
     loss = (
 
-        1.0 * L_mmd
+        0.5 * L_mmd
         +
-        0.5 * L_integral
+        0.1 * L_integral
         +
-        0.5 * L_rms
+        0.1 * L_rms
         +
-        0.3 * L_aux
+        0.001 * L_aux
         +
-        0.05 * L_transport
+        0.01 * L_transport
+        +
+        1.0 * L_spatial
+        +
+        1.0 * L_tv
+        +
+        0.5 * L_lap
     )
 
     loss_dict = {
-
         "total": loss.item(),
         "mmd": L_mmd.item(),
         "integral": L_integral.item(),
         "rms": L_rms.item(),
         "aux": L_aux.item(),
-        "transport": L_transport.item()
+        "transport": L_transport.item(),
+        "spatial": L_spatial.item(),
+        "totvar": L_tv.item(),
+        "laplace": L_tv.item()        
     }
 
     return loss, loss_dict
@@ -576,6 +666,9 @@ def train_epoch(
         "rms": [],
         "aux": [],
         "transport": [],
+        "spatial": [],
+        "totvar": [],
+        "laplace": [],
         "delta_h": []
     }
     
@@ -652,6 +745,8 @@ def train_epoch(
             W
         )
 
+        #print(f"\t\t\t ---> pred sum: {pred.sum().item()}, data sum: {data.sum().item()}")
+        
         loss, info = (
             compute_cygno_loss(
                 pred,
@@ -713,6 +808,24 @@ def train_epoch(
         )
 
         epoch_stats[
+            "spatial"
+        ].append(
+            info["spatial"]
+        )
+
+        epoch_stats[
+            "totvar"
+        ].append(
+            info["totvar"]
+        )
+
+        epoch_stats[
+            "laplace"
+        ].append(
+            info["laplace"]
+        )
+
+        epoch_stats[
             "delta_h"
         ].append(
             out["delta_h"]
@@ -763,6 +876,9 @@ def train_model(inputfile,outputfile,epochs=20):
         "integral": [],
         "rms": [],
         "transport": [],
+        "spatial": [],
+        "totvar": [],
+        "laplace": [],
         "delta_h": []
     }
     
@@ -776,7 +892,7 @@ def train_model(inputfile,outputfile,epochs=20):
             loader,
             optimizer,
             device=device,
-            max_batches=1000
+            max_batches=50
         )
 
         for k in train_history:
@@ -955,7 +1071,7 @@ def test_training(
     # visual test
     # -----------------------
     import matplotlib.pyplot as plt
-
+    
     idx = np.random.randint(N)
 
     fig, ax = plt.subplots(
@@ -984,3 +1100,50 @@ def test_training(
 
     plt.tight_layout()
     plt.show()
+
+
+    fig, ax = plt.subplots(
+        10,
+        3,
+        figsize=(9,20)
+    )
+    
+    for i in range(10):
+        
+        idx = np.random.randint(N)
+        
+        vmax = max(
+            sim[0,idx].max().item(),
+            pred[0,idx].max().item(),
+            data[0,idx].max().item()
+        )
+
+        ax[i,0].imshow(
+            sim[0,idx].cpu(),
+            origin="lower",
+            # vmin=0,
+            # vmax=vmax
+        )
+
+        ax[i,1].imshow(
+            pred[0,idx].cpu(),
+            origin="lower",
+            #vmin=0,
+            #vmax=vmax
+        )
+
+        ax[i,2].imshow(
+            data[0,idx].cpu(),
+            origin="lower",
+            #vmin=0,
+            #vmax=vmax
+        )
+
+    plt.tight_layout()
+    fig.savefig(
+        "debug_cluster_corr.pdf",
+        format="pdf",
+        bbox_inches="tight"
+    )
+    plt.show()
+
