@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import numpy as np
 
 from data_reading.clusterDataset import ConditionalClusterDataset
 from data_reading.read_data_2D import make_cygno_collate_fn
@@ -176,9 +177,9 @@ class DifferentialTransport(nn.Module):
 
         # ---------------------------------------
         # IMPORTANT: learnable residual scale
-        # starts at ZERO → identity at init
+        # starts at ZERO → identity at init (EDM ho messo 0.01 per non partire dall'identita' e non farlo rimanere bloccato)
         # ---------------------------------------
-        self.gamma = nn.Parameter(torch.tensor(0.0))
+        self.gamma = nn.Parameter(torch.tensor(0.01))
 
         # ---------------------------------------
         # stable init
@@ -467,6 +468,9 @@ def compute_cygno_loss(
         data_feat.mean(0)
     ).pow(2).mean()
 
+    # normalize to the number of elements
+    L_mmd = L_mmd / pred.shape[0]
+    
     # --------------------------------
     # physics constraints
     # --------------------------------
@@ -484,6 +488,9 @@ def compute_cygno_loss(
         data_integral
     ).pow(2).mean()
 
+    # normalize to the number of elements
+    L_integral = L_integral / pred.numel()
+    
     pred_rms = pred.std(
         dim=(-1, -2)
     )
@@ -557,19 +564,33 @@ def train_epoch(
         model,
         loader,
         optimizer,
-        device="cuda"):
+        device="mps",
+        max_batches=None):
 
     model.train()
 
-    running_loss = 0
+    epoch_stats = {
+        "loss": [],
+        "mmd": [],
+        "integral": [],
+        "rms": [],
+        "aux": [],
+        "transport": [],
+        "delta_h": []
+    }
+    
 
-    MAX_BATCHES_PER_EPOCH = 1000
     print(f"\n\tNumber of batches in this epoch: {len(loader)}")
 
     for ibatch, batch in enumerate(loader):
         
-        if ibatch >= MAX_BATCHES_PER_EPOCH:
+        if (max_batches is not None
+            and ibatch >= max_batches
+            ):
             break
+
+        if ibatch % 10 == 0:
+            print (f"\t\t  running ibatch {ibatch}...")
     
         sim = batch[
             "sim_images"
@@ -639,7 +660,6 @@ def train_epoch(
                 out["delta_h"]
             )
         )
-
         
         optimizer.zero_grad()
 
@@ -652,19 +672,64 @@ def train_epoch(
 
         optimizer.step()
 
-        running_loss += loss.item()
+        # ------------------------
+        # accumulate stats
+        # ------------------------
 
-        if ibatch % 10 == 0:
-            print (f"\t\t===> ibatch b={ibatch} / {len(loader)}...")
-            print (f"\t\t     Running loss/len(loader) = {running_loss / len(loader)}")
+        epoch_stats[
+            "loss"
+        ].append(
+            info["total"]
+        )
 
-        ibatch += 1
+        epoch_stats[
+            "mmd"
+        ].append(
+            info["mmd"]
+        )
 
-    return (
-        running_loss
-        /
-        len(loader)
-    )
+        epoch_stats[
+            "integral"
+        ].append(
+            info["integral"]
+        )
+
+        epoch_stats[
+            "rms"
+        ].append(
+            info["rms"]
+        )
+
+        epoch_stats[
+            "aux"
+        ].append(
+            info["aux"]
+        )
+
+        epoch_stats[
+            "transport"
+        ].append(
+            info["transport"]
+        )
+
+        epoch_stats[
+            "delta_h"
+        ].append(
+            out["delta_h"]
+            .norm()
+            .item()
+        )
+
+    # ------------------------
+    # epoch average
+    # ------------------------
+    epoch_stats = {
+        k: np.mean(v)
+        for k, v in
+        epoch_stats.items()
+    }
+
+    return epoch_stats
 
 
 # === FULL TRAINING ===
@@ -673,6 +738,7 @@ def train_model(inputfile,outputfile,epochs=20):
     device = (
         "cuda"
         if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
 
@@ -690,46 +756,142 @@ def train_model(inputfile,outputfile,epochs=20):
         lr=1e-4
     )
 
+    train_history = {
+        "loss": [],
+        "mmd": [],
+        "aux": [],
+        "integral": [],
+        "rms": [],
+        "transport": [],
+        "delta_h": []
+    }
+    
     print(f"Initialized the model. Now start the training on the device: {device}")
     for epoch in range(epochs):
 
         print(f"\t|Start epoch n. {epoch}...")
-        loss = train_epoch(
+
+        stats = train_epoch(
             model,
             loader,
             optimizer,
-            device
+            device=device,
+            max_batches=1000
         )
 
-        print(
-            f"Epoch "
-            f"{epoch} "
-            f"loss={loss:.4f}"
-        )
+        for k in train_history:
+            train_history[k].append(
+                stats[k]
+            )
 
+        print(f"epoch {epoch}")
+
+        for k, v in stats.items():
+            print(
+                f"{k}: "
+                f"{v:.4f}"
+            )
+                
     torch.save(
         model.state_dict(),
         outputfile
     )
 
-    return model
+    return (model,
+            train_history)
 
+
+def plot_training_history(train_history):
+
+    import matplotlib.pyplot as plt
+
+    for key in train_history:
+        plt.figure(
+            figsize=(6,4)
+        )
+        plt.plot(
+            train_history[key]
+        )
+        plt.xlabel(
+            "epoch"
+        )
+        plt.ylabel(
+            key
+        )
+        plt.title(
+            key
+        )
+        plt.grid()
+
+    plt.show()
 
 # === test of the training ===
 def test_training(
-        model,
-        inputfile):
+    model_or_path,
+    inputfile,
+    device=None):
 
-    _, loader = build_dataloader(
-        inputfile,
-        batch_size=1
+    # -----------------------
+    # device
+    # -----------------------
+    if device is None:
+
+        if torch.backends.mps.is_available():
+            device = "mps"
+
+        elif torch.cuda.is_available():
+            device = "cuda"
+
+        else:
+            device = "cpu"
+
+    # -----------------------
+    # load model if needed
+    # -----------------------
+    if isinstance(
+        model_or_path,
+        str
+    ):
+
+        print(
+            f"\nLoading model "
+            f"from:\n"
+            f"{model_or_path}"
+        )
+
+        model = (
+            CygnoTransportModel()
+            .to(device)
+        )
+
+        state = torch.load(
+            model_or_path,
+            map_location=device
+        )
+
+        model.load_state_dict(
+            state
+        )
+
+    else:
+
+        model = model_or_path.to(
+            device
+        )
+
+    model.eval()
+
+    # -----------------------
+    # dataloader
+    # -----------------------
+    _, loader = (
+        build_dataloader(
+            inputfile,
+            batch_size=1
+        )
     )
 
     batch = next(iter(loader))
-
-    device = next(
-        model.parameters()
-    ).device
 
     sim = batch[
         "sim_images"
@@ -789,9 +951,12 @@ def test_training(
         W
     )
 
+    # -----------------------
+    # visual test
+    # -----------------------
     import matplotlib.pyplot as plt
 
-    idx = 0
+    idx = np.random.randint(N)
 
     fig, ax = plt.subplots(
         1,
@@ -817,4 +982,5 @@ def test_training(
     )
     ax[2].set_title("DATA")
 
+    plt.tight_layout()
     plt.show()

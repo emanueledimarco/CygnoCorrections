@@ -34,7 +34,6 @@ class ConditionalClusterDataset(Dataset):
         self.sim_keys_by_z = {}
         self.data_keys_by_z = {}
 
-        print("SIM keys:")
         for key in self.sim_dict:
 
             z, alpha, lambda_ = key
@@ -44,7 +43,6 @@ class ConditionalClusterDataset(Dataset):
 
             self.sim_keys_by_z.setdefault(z, []).append(key)
 
-        print("DATA keys:")
         for key in self.data_dict:
 
             z, P, T, H = key

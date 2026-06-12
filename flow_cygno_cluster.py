@@ -10,7 +10,7 @@ import json
 import hashlib
 
 from data_reading.read_data_2D import *
-from training.clusterTraining import forward_test, train_model, test_training
+from training.clusterTraining import forward_test, train_model, test_training, plot_training_history
 
 if __name__ == "__main__":
 
@@ -20,6 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--integrity",action="store_true",help="use cached clusters dataset, and do integrity tests")
     parser.add_argument("--fwdtest",action="store_true",help="do the fwd test of the CYGNO transport model")
     parser.add_argument("--train",action="store_true",help="train the correction")
+    parser.add_argument("--test",action="store_true",help="train the correction")
     args = parser.parse_args()
 
     #loop to read over network condigurations from the yaml file: - one way to do hyperparameter optimization
@@ -37,11 +38,14 @@ if __name__ == "__main__":
     if args.fwdtest:
         forward_test(inputfile)
 
+    outputmodel = os.getcwd() + "/results/" + str(conf) + "/saved_states/best_model.pt"
     if args.train:
-        outputmodel = os.getcwd() + "/results/" + str(conf) + "/saved_states/best_model.pt"
         print("\n\t === TRAIN THE MODEL ===")
-        train_model(inputfile,outputmodel)
+        model, history = train_model(inputfile,outputmodel)
+        plot_training_history(history)
         print("\n\t === TEST THE MODEL ===")
         print(f"\nTest the trained model using the saved state in {outputmodel}")
-        test_training(outputmodel,inputfile)
+        test_training(model,inputfile)
         
+    if args.test:
+        test_training(outputmodel,inputfile)
