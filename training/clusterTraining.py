@@ -9,11 +9,7 @@ from data_reading.read_data_2D import make_cygno_collate_fn
 
 class ConditionEncoder(nn.Module):
 
-    def __init__(
-        self,
-        emb_dim=64
-    ):
-
+    def __init__(self, emb_dim=64):
         super().__init__()
 
         self.sim_encoder = nn.Sequential(
@@ -28,21 +24,21 @@ class ConditionEncoder(nn.Module):
             nn.Linear(64, emb_dim)
         )
 
-    def forward(
-        self,
-        sim_cond,
-        data_cond
-    ):
+    def forward(self, sim_cond, data_cond):
+        # Generiamo l'embedding della SIM
+        e_sim = self.sim_encoder(sim_cond)
 
-        e_sim = self.sim_encoder(
-            sim_cond
-        )
-
-        e_data = self.data_encoder(
-            data_cond
-        )
+        # Controllo di identità geometrico: se le shape dell'input coincidono 
+        # significa che stiamo passando sim_cond anche nel secondo argomento.
+        if sim_cond.shape[-1] == data_cond.shape[-1] and torch.equal(sim_cond, data_cond):
+            # Usiamo il sim_encoder anche per il target, dato che è un passo di identità SIM->SIM
+            e_data = self.sim_encoder(data_cond)
+        else:
+            # Flusso standard di trasporto verso i DATA reali
+            e_data = self.data_encoder(data_cond)
 
         return e_sim, e_data
+
 
 class ClusterEncoder(nn.Module):
 
@@ -87,13 +83,10 @@ class ClusterEncoder(nn.Module):
             latent_dim
         )
 
-    def forward(
-        self,
-        x
-    ):
-
+    def forward(self,x):
         h = self.net(x)
-
+        # Forziamo h ad avere una scala sana (media=0, std=1) lungo la dimensione latente
+        h = (h - h.mean(dim=-1, keepdim=True)) / (h.std(dim=-1, keepdim=True) + 1e-6)
         return self.fc(h)
 
 
@@ -164,14 +157,12 @@ class DifferentialTransport(nn.Module):
 
         super().__init__()
 
+        # IMPORTANT: Ora l'input è latent_dim + (2 * cond_dim) -> 128 + 128 = 256
         self.net = nn.Sequential(
-
-            nn.Linear(latent_dim + cond_dim, 256),
+            nn.Linear(latent_dim + (2 * cond_dim), 256),
             nn.SiLU(),
-
             nn.Linear(256, 256),
             nn.SiLU(),
-
             nn.Linear(256, latent_dim)
         )
 
@@ -197,16 +188,17 @@ class DifferentialTransport(nn.Module):
         nn.init.xavier_uniform_(self.net[-1].weight, gain=0.01)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, h, delta_e):
-
-        x = torch.cat([h, delta_e], dim=-1)
+        
+    def forward(self, h, cond_total):
+        # cond_total contiene [e_sim, e_data] già concatenati a monte
+        x = torch.cat([h, cond_total], dim=-1)
 
         raw_delta = self.net(x)
 
         # ---------------------------------------
         # normalize update scale
         # ---------------------------------------
-        raw_delta = raw_delta / (raw_delta.std(dim=-1, keepdim=True) + 1e-6)
+        #raw_delta = raw_delta / (raw_delta.std(dim=-1, keepdim=True) + 1e-6)
 
         # ---------------------------------------
         # controlled residual update
@@ -214,99 +206,48 @@ class DifferentialTransport(nn.Module):
         delta_h = self.gamma * raw_delta
 
         return delta_h
-    
-class CygnoTransportModel(
-    nn.Module
-):
 
-    def __init__(
-        self,
-        latent_dim=128
-    ):
 
+class CygnoTransportModel(nn.Module):
+
+    def __init__(self, latent_dim=128):
         super().__init__()
 
-        self.encoder = (
-            ClusterEncoder(
-                latent_dim
-            )
-        )
+        self.encoder = ClusterEncoder(latent_dim)
+        self.cond_encoder = ConditionEncoder()
+        
+        # Passiamo implicitamente cond_dim=64 (il default del ConditionEncoder)
+        self.transport = DifferentialTransport(latent_dim, cond_dim=64)
+        self.decoder = ClusterDecoder(latent_dim)
 
-        self.cond_encoder = (
-            ConditionEncoder()
-        )
+    def forward(self, sim_img, sim_cond, data_cond):
+        # 1. Spazio latente del cluster
+        h = self.encoder(sim_img)
 
-        self.transport = (
-            DifferentialTransport(
-                latent_dim
-            )
-        )
+        # print("Varianza di h nel batch:", h.std(dim=0).mean().item())
+        
+        # 2. Embedding delle due condizioni non numeriche
+        e_sim, e_data = self.cond_encoder(sim_cond, data_cond)
 
-        self.decoder = (
-            ClusterDecoder(
-                latent_dim
-            )
-        )
+        # 3. Concateniamo invece di fare la sottrazione.
+        # Questo permette al network di mappare (alpha, lambda) -> (P, T, H)
+        # preservando la coordinata 'z' comune.
+        cond_totale = torch.cat([e_sim, e_data], dim=-1)
 
-    def forward(
-        self,
-        sim_img,
-        sim_cond,
-        data_cond
-    ):
-
-        # -------------------
-        # encode image
-        # -------------------
-        h = self.encoder(
-            sim_img
-        )
-
-        # -------------------
-        # encode conditions
-        # -------------------
-        e_sim, e_data = (
-            self.cond_encoder(
-                sim_cond,
-                data_cond
-            )
-        )
-
-        delta_e = (
-            e_data - e_sim
-        )
-
-        # -------------------
-        # residual transport
-        # -------------------
-        delta_h = (
-            self.transport(
-                h,
-                delta_e
-            )
-        )
-
+        # 4. Trasporto residuo
+        delta_h = self.transport(h, cond_totale)
         h_corr = h + delta_h
 
-        # -------------------
-        # decode
-        # -------------------
-        pred = self.decoder(
-            h_corr
-        )
+        # 5. Ricostruzione dell'immagine corretta
+        pred = self.decoder(h_corr)
 
         return {
-
             "pred": pred,
-
             "latent": h,
-
             "delta_h": delta_h,
-
-            "corrected_latent":
-                h_corr
+            "corrected_latent": h_corr
         }
-
+    
 
 def forward_test(inputfile):
 
@@ -317,7 +258,7 @@ def forward_test(inputfile):
     
     loader = DataLoader(
         dataset,
-        batch_size=2,
+        batch_size=8,
         shuffle=True,
         collate_fn=make_cygno_collate_fn(dataset)
     )
@@ -504,11 +445,13 @@ def compute_cygno_loss(
     pred,
     data,
     data_scalars,
-    delta_h
+    delta_h,
+    pred_identity=None,
+    sim_images=None
 ):
 
     # clamp of the intensity
-    pred = F.softplus(pred)
+    pred = F.elu(pred) + 1
     
     pred_n = pred / (pred.sum(dim=(-1,-2), keepdim=True) + 1e-8)
     data_n = data / (data.sum(dim=(-1,-2), keepdim=True) + 1e-8)
@@ -604,13 +547,23 @@ def compute_cygno_loss(
         pred_n,
         data_n
     )
-
+    
     # ------------------------------------------------------------
     # total variation loss and smoothness (to reduce pixels jumps)
     # ------------------------------------------------------------
     L_tv = total_variation(pred)
     L_lap = laplacian_smoothness(pred)
-    
+
+    # ------------------------------------------------------------
+    # Nuova Loss di Identità (Autoencoder)
+    # ------------------------------------------------------------
+    L_identity = 0.0
+    if pred_identity is not None and sim_images is not None:
+        # Applichiamo il softplus anche qui per consistenza con l'output intensità
+        pred_id_clamped = F.elu(pred_identity) + 1
+        # Semplice MSE a livello di pixel tra l'input SIM e la sua ricostruzione
+        L_identity = F.mse_loss(pred_id_clamped, sim_images)
+        
     # --------------------------------
     # final weighted loss
     # --------------------------------
@@ -624,13 +577,15 @@ def compute_cygno_loss(
         +
         0.001 * L_aux
         +
-        0.01 * L_transport
+        0.0 * L_transport
         +
-        1.0 * L_spatial
+        0.0 * L_spatial # remove for now. Do NOT turn it ON !
         +
-        1.0 * L_tv
+        0.1 * L_tv
         +
-        0.5 * L_lap
+        0.1 * L_lap
+        +
+        2.0 * L_identity
     )
 
     loss_dict = {
@@ -642,7 +597,8 @@ def compute_cygno_loss(
         "transport": L_transport.item(),
         "spatial": L_spatial.item(),
         "totvar": L_tv.item(),
-        "laplace": L_tv.item()        
+        "laplace": L_tv.item(),
+        "identity": L_identity.item() if isinstance(L_identity, torch.Tensor) else 0.0
     }
 
     return loss, loss_dict
@@ -669,7 +625,8 @@ def train_epoch(
         "spatial": [],
         "totvar": [],
         "laplace": [],
-        "delta_h": []
+        "delta_h": [],
+        "identity": []
     }
     
 
@@ -736,15 +693,17 @@ def train_epoch(
             data_cond
         )
 
-        pred = out[
-            "pred"
-        ].view(
-            B,
-            N,
-            H,
-            W
+        pred = out["pred"].view(B,N,H,W)
+
+        # to force DeltaH=0 for same input/output conditions (sim_cond)
+        out_identity = model(
+            sim,
+            sim_cond,
+            sim_cond
         )
 
+        pred_identity = out_identity["pred"].view(B, N, H, W)
+        
         #print(f"\t\t\t ---> pred sum: {pred.sum().item()}, data sum: {data.sum().item()}")
         
         loss, info = (
@@ -752,7 +711,9 @@ def train_epoch(
                 pred,
                 data,
                 data_scalars,
-                out["delta_h"]
+                delta_h=out["delta_h"],
+                pred_identity=pred_identity,
+                sim_images=sim.view(B, N, H, W)
             )
         )
         
@@ -826,6 +787,12 @@ def train_epoch(
         )
 
         epoch_stats[
+            "identity"
+        ].append(
+            info["identity"]
+        )
+
+        epoch_stats[
             "delta_h"
         ].append(
             out["delta_h"]
@@ -846,7 +813,7 @@ def train_epoch(
 
 
 # === FULL TRAINING ===
-def train_model(inputfile,outputfile,epochs=20):
+def train_model(inputfile,outputfile,epochs=10):
     
     device = (
         "cuda"
@@ -892,7 +859,7 @@ def train_model(inputfile,outputfile,epochs=20):
             loader,
             optimizer,
             device=device,
-            max_batches=50
+            max_batches=100
         )
 
         for k in train_history:
@@ -1000,13 +967,7 @@ def test_training(
     # -----------------------
     # dataloader
     # -----------------------
-    _, loader = (
-        build_dataloader(
-            inputfile,
-            batch_size=1
-        )
-    )
-
+    _, loader = build_dataloader(inputfile, batch_size=2) # <--- Metti a 2!
     batch = next(iter(loader))
 
     sim = batch[
@@ -1058,92 +1019,85 @@ def test_training(
             data_cond
         )
 
-    pred = out[
-        "pred"
-    ].view(
+    pred = out["pred"].view(
         B,
         N,
         H,
         W
     )
 
+    print("DEBUG TRA BATCH DIFFERENTI: ")
+    # Confrontiamo l'evento 0 del batch 0 con l'evento 0 del batch 1
+    print(pred[0,0].mean(), pred[1,0].mean())
+    
+    corr = torch.corrcoef(
+        torch.stack([
+            pred[0,0].flatten(),
+            pred[1,0].flatten()
+        ])
+    )
+    print("corcoeff vero:")
+    print(corr)
+    print("END DEBUG.")
+    
     # -----------------------
     # visual test
     # -----------------------
+    # -----------------------------------------------------------------
+    # NUOVO CODICE PER IL VISUAL TEST (Variazione tra condizioni diverse)
+    # -----------------------------------------------------------------
     import matplotlib.pyplot as plt
     
-    idx = np.random.randint(N)
+    # Impostiamo il loader del test per avere batch_size = 1
+    # Vogliamo raccogliere 10 batch distinti per avere 10 condizioni diverse
+    test_sims = []
+    test_preds = []
+    test_datas = []
+    
+    model.eval()
+    with torch.no_grad():
+        for ibatch, batch in enumerate(loader):
+            if ibatch >= 10:  # Ci fermiamo quando abbiamo 10 batch diversi
+                break
+                
+            sim = batch["sim_images"].to(device)
+            sim_cond = batch["sim_cond"].to(device)
+            data_cond = batch["data_cond"].to(device)
+            
+            B, N, H, W = sim.shape
+            sim_flat = sim.view(B * N, 1, H, W)
+            
+            # Espandiamo le condizioni per il match flat
+            sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
+            data_cond_flat = data_cond.repeat_interleave(N, dim=0)
+            
+            # Forward
+            out = model(sim_flat, sim_cond_flat, data_cond_flat)
+            pred_flat = F.elu(out["pred"]) + 1.0
+            pred = pred_flat.view(B, N, H, W)
+            
+            # Scegliamo il primo sotto-cluster (idx=0) di questo specifico batch
+            test_sims.append(sim[0, 0].cpu())
+            test_preds.append(pred[0, 0].cpu())
+            test_datas.append(batch["data_images"][0, 0].cpu())
 
-    fig, ax = plt.subplots(
-        1,
-        3,
-        figsize=(15,5)
-    )
-
-    ax[0].imshow(
-        sim[0,idx].cpu(),
-        origin="lower"
-    )
-    ax[0].set_title("SIM")
-
-    ax[1].imshow(
-        pred[0,idx].cpu(),
-        origin="lower"
-    )
-    ax[1].set_title("CORRECTED")
-
-    ax[2].imshow(
-        data[0,idx].cpu(),
-        origin="lower"
-    )
-    ax[2].set_title("DATA")
-
-    plt.tight_layout()
-    plt.show()
-
-
-    fig, ax = plt.subplots(
-        10,
-        3,
-        figsize=(9,20)
-    )
+    # Ora disegnamo le 10 righe, ognuna corrispondente a un BATCH differente
+    fig, ax = plt.subplots(10, 3, figsize=(9, 20))
     
     for i in range(10):
+        # Spaziamo i colori dinamicamente per ogni riga
+        vmax = max(test_sims[i].max().item(), test_preds[i].max().item())
         
-        idx = np.random.randint(N)
+        ax[i,0].imshow(test_sims[i], origin="lower", vmax=vmax)
+        ax[i,0].set_title(f"SIM (Batch {i})") if i==0 else None
         
-        vmax = max(
-            sim[0,idx].max().item(),
-            pred[0,idx].max().item(),
-            data[0,idx].max().item()
-        )
-
-        ax[i,0].imshow(
-            sim[0,idx].cpu(),
-            origin="lower",
-            # vmin=0,
-            # vmax=vmax
-        )
-
-        ax[i,1].imshow(
-            pred[0,idx].cpu(),
-            origin="lower",
-            #vmin=0,
-            #vmax=vmax
-        )
-
-        ax[i,2].imshow(
-            data[0,idx].cpu(),
-            origin="lower",
-            #vmin=0,
-            #vmax=vmax
-        )
-
+        ax[i,1].imshow(test_preds[i], origin="lower", vmax=vmax)
+        ax[i,1].set_title(f"CORRECTED (Batch {i})") if i==0 else None
+        
+        ax[i,2].imshow(test_datas[i], origin="lower")
+        ax[i,2].set_title(f"DATA (Batch {i})") if i==0 else None
+        
     plt.tight_layout()
-    fig.savefig(
-        "debug_cluster_corr.pdf",
-        format="pdf",
-        bbox_inches="tight"
-    )
     plt.show()
-
+    
+    
