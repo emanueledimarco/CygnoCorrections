@@ -76,12 +76,14 @@ class ConditionalClusterDataset(Dataset):
         excluded = {"pix", "cond", "meta"}
         values = []
      
-        for k, v in cluster.__dict__.items():
+        # Ordiniamo alfabeticamente le chiavi per garantire il determinismo totale
+        for k in sorted(cluster.__dict__.keys()):
      
             if k in excluded:
                 continue
      
-            if np.isscalar(v):
+            v = cluster.__dict__[k]
+            if np.isscalar(v) and not isinstance(v, (str, bool)):
                 values.append(float(v))
      
         return torch.tensor(

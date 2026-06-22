@@ -210,7 +210,7 @@ class DifferentialTransport(nn.Module):
 
 class CygnoTransportModel(nn.Module):
 
-    def __init__(self, latent_dim=128):
+    def __init__(self, latent_dim=128, cond_dim=64, num_scalars=4):
         super().__init__()
 
         self.encoder = ClusterEncoder(latent_dim)
@@ -220,32 +220,35 @@ class CygnoTransportModel(nn.Module):
         self.transport = DifferentialTransport(latent_dim, cond_dim=64)
         self.decoder = ClusterDecoder(latent_dim)
 
-    def forward(self, sim_img, sim_cond, data_cond):
-        # 1. Spazio latente del cluster
-        h = self.encoder(sim_img)
-
-        # print("Varianza di h nel batch:", h.std(dim=0).mean().item())
+        # per correggere gli scalari basandosi sul contesto ambientale
+        # (cond_dim * 2 perché concateniamo l'embedding di SIM e DATA)
+        self.scalar_transport = nn.Sequential(
+            nn.Linear(cond_dim * 2, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_scalars)
+        )
         
-        # 2. Embedding delle due condizioni non numeriche
-        e_sim, e_data = self.cond_encoder(sim_cond, data_cond)
 
-        # 3. Concateniamo invece di fare la sottrazione.
-        # Questo permette al network di mappare (alpha, lambda) -> (P, T, H)
-        # preservando la coordinata 'z' comune.
+    def forward(self, sim_img, sim_cond, data_cond, sim_scalars):
+        # 1. Immagini e Spazio latente
+        h = self.encoder(sim_img)
+        e_sim, e_data = self.cond_encoder(sim_cond, data_cond)
         cond_totale = torch.cat([e_sim, e_data], dim=-1)
 
-        # 4. Trasporto residuo
         delta_h = self.transport(h, cond_totale)
         h_corr = h + delta_h
+        pred_img = self.decoder(h_corr)
 
-        # 5. Ricostruzione dell'immagine corretta
-        pred = self.decoder(h_corr)
+        # 2. Correzione degli scalari pre-calcolati (Residual Transport)
+        # sim_scalars ha forma [B*N, num_scalars]
+        delta_scalars = self.scalar_transport(cond_totale)
+        pred_scalars = sim_scalars + delta_scalars
 
         return {
-            "pred": pred,
+            "pred": pred_img,
+            "pred_scalars": pred_scalars,
             "latent": h,
-            "delta_h": delta_h,
-            "corrected_latent": h_corr
+            "delta_h": delta_h
         }
     
 
@@ -351,53 +354,27 @@ def build_dataloader(
 
     return dataset, loader
 
-def image_to_scalars(img):
 
-    """
-    img: [B,N,H,W]
-    """
+def compute_mmd_rbf(X, Y):
+    B_X = X.size(0)
+    B_Y = Y.size(0)
+    
+    XX = torch.cdist(X, X, p=2).pow(2)
+    YY = torch.cdist(Y, Y, p=2).pow(2)
+    XY = torch.cdist(X, Y, p=2).pow(2)
+    
+    with torch.no_grad():
+        median_dist = torch.median(XY)
+        gamma = 1.0 / (2.0 * median_dist + 1e-8)
+        gamma = torch.clamp(gamma, min=1e-3, max=1e6)
+    
+    K_XX = torch.exp(-gamma * XX)
+    K_YY = torch.exp(-gamma * YY)
+    K_XY = torch.exp(-gamma * XY)
+    
+    mmd = K_XX.sum() / (B_X * (B_X - 1) + 1e-6) + K_YY.sum() / (B_Y * (B_Y - 1) + 1e-6) - 2 * K_XY.sum() / (B_X * B_Y + 1e-6)
+    return mmd
 
-    integral = img.sum(dim=(-1, -2))
-
-    mean = img.mean(dim=(-1, -2))
-
-    rms = img.std(dim=(-1, -2))
-
-    nhits = (img > 0).float().sum(
-        dim=(-1, -2)
-    )
-
-    return torch.stack([
-        integral,
-        mean,
-        rms,
-        nhits
-    ], dim=-1)
-
-
-def spatial_gradient_loss(pred, target):
-
-    # pred: [B, N, H, W]
-    # target: [B, N, H, W]
-
-    B, N, H, W = pred.shape
-
-    pred = pred.view(B*N, 1, H, W)
-    target = target.view(B*N, 1, H, W)
-
-    dx_pred = pred[..., :, 1:] - pred[..., :, :-1]
-    dy_pred = pred[..., 1:, :] - pred[..., :-1, :]
-
-    dx_tgt = target[..., :, 1:] - target[..., :, :-1]
-    dy_tgt = target[..., 1:, :] - target[..., :-1, :]
-
-    loss = (
-        (dx_pred - dx_tgt).pow(2).mean()
-        +
-        (dy_pred - dy_tgt).pow(2).mean()
-    )
-
-    return loss
 
 def total_variation(x):
 
@@ -435,6 +412,13 @@ def laplacian_smoothness(x):
     # smoothness scalar
     return lap.pow(2).mean()
 
+def extract_profiles(x):
+    # x ha shape [BatchTotale, 64, 64]
+    profilo_x = x.sum(dim=-2) # Somma lungo le righe -> [BatchTotale, 64]
+    profilo_y = x.sum(dim=-1) # Somma lungo le colonne -> [BatchTotale, 64]
+    # Concateniamo i due profili per ottenere un vettore di feature da 128 elementi
+    return torch.cat([profilo_x, profilo_y], dim=-1)
+
 
 # === COMPLETE LOSS FUNCTION ===
 # A) distribution matching
@@ -444,42 +428,41 @@ def laplacian_smoothness(x):
 def compute_cygno_loss(
     pred,
     data,
-    data_scalars,
+    pred_scalars,
+    target_scalars,
     delta_h,
     pred_identity=None,
     sim_images=None
 ):
 
-    # clamp of the intensity
-    pred = F.elu(pred) + 1
-    
-    pred_n = pred / (pred.sum(dim=(-1,-2), keepdim=True) + 1e-8)
-    data_n = data / (data.sum(dim=(-1,-2), keepdim=True) + 1e-8)
-    
-    # --------------------------------
-    # MMD-like feature matching
-    # --------------------------------
-    def features(x):
+    # 1. Portiamo subito i tensori in formato Flat [StepTotati, H, W] 
+    # per non fare confusione con B e N nelle loss statistiche
+    # pred shape nativa: [B, N, H, W] -> diventerà [B*N, H, W]
+    pred_flat = pred.view(-1, pred.shape[-2], pred.shape[-1])
+    data_flat = data.view(-1, data.shape[-2], data.shape[-1])
 
-        return torch.stack([
+    # 2. Pulizia dei dati reali dai pixel negativi (Noise Clamping)
+    # Importante: i dati simulati sono già positivi (grazie a ELU+1), 
+    # ma i dati reali hanno fluttuazioni negative del piedistallo.
+    data_flat = torch.clamp(data_flat, min=0.0)
 
-            x.sum(dim=(-1, -2)),
-            x.mean(dim=(-1, -2)),
-            x.std(dim=(-1, -2))
+    # 3. Normalizzazione a densità probabilistica spaziale (Somma = 1 per ogni singolo cluster)
+    pred_n = pred_flat / (pred_flat.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    data_n = data_flat / (data_flat.sum(dim=(-1, -2), keepdim=True) + 1e-8)
 
-        ], dim=-1)
+    # print("SHAPE CHECK:")
+    # print("pred_n shape:", pred_n.shape)  # Deve essere [B*N, 1, 64, 64] o [B, N, 64, 64]
+    # print("data_n shape:", data_n.shape)  # Deve essere identica a pred_n
+    # print("RANGE CHECK (Primo elemento del batch):")
+    # print(f"PRED_N -> Min: {pred_n[0].min().item():.4f} | Max: {pred_n[0].max().item():.4f} | Sum: {pred_n[0].sum().item():.4f}")
+    # print(f"DATA_N -> Min: {data_n[0].min().item():.4f} | Max: {data_n[0].max().item():.4f} | Sum: {data_n[0].sum().item():.4f}")
 
-    pred_n_feat = features(pred_n)
-    data_n_feat = features(data_n)
+    # Estraiamo i profili proiettati (Shape finale: [B*N, 128])
+    pred_n_feat = extract_profiles(pred_n)
+    data_n_feat = extract_profiles(data_n)
 
-    L_mmd = (
-        pred_n_feat.mean(0)
-        -
-        data_n_feat.mean(0)
-    ).pow(2).mean()
-
-    # normalize to the number of elements
-    L_mmd = L_mmd / pred_n.shape[0]
+    # Calcoliamo la loss sulle forme geometriche dei profili
+    L_mmd = compute_mmd_rbf(pred_n_feat, data_n_feat)
     
     # --------------------------------
     # physics constraints
@@ -518,35 +501,56 @@ def compute_cygno_loss(
     # --------------------------------
     # auxiliary scalar supervision
     # --------------------------------
-    pred_scalars = image_to_scalars(
-        pred
+    # Calcoliamo medie e deviazioni standard lungo il batch (dim=0)
+    mean_pred = pred_scalars.mean(dim=0)
+    mean_tgt  = target_scalars.mean(dim=0)
+    
+    std_pred  = pred_scalars.std(dim=0)
+    std_tgt   = target_scalars.std(dim=0)
+
+    # Normalizziamo l'MSE dividendo per il target reale (più epsilon anti-zero).
+    # In questo modo un errore di 1000 su un target di 20000 peserà solo (1000/20000)^2 = 0.0025,
+    # neutralizzando l'esplosione dei gradienti dovuta all'unità di misura sCMOS.
+    L_scalars_mean = F.mse_loss(
+        mean_pred / (mean_tgt + 1e-5), 
+        mean_tgt / (mean_tgt + 1e-5)
     )
-
-    target_scalars = data_scalars[
-        ...,
-        :4
-    ]
-
-    L_aux = F.mse_loss(
-        pred_scalars,
-        target_scalars
+    
+    L_scalars_std = F.mse_loss(
+        std_pred / (std_tgt + 1e-5), 
+        std_tgt / (std_tgt + 1e-5)
     )
+    
+    L_aux = L_scalars_mean + L_scalars_std
 
+    # ------------------------------------------------------------
+    # SANITY CHECK DELLE VARIABILI SCALARI
+    # ------------------------------------------------------------
+    with torch.no_grad():
+        # Portiamo i tensori in formato flat per analizzarli
+        # pred_scalars e target_scalars hanno shape [B, N, 4] -> passiamo a [B*N, 4]
+        p_scal_flat = pred_scalars.view(-1, pred_scalars.shape[-1])
+        t_scal_flat = target_scalars.view(-1, target_scalars.shape[-1])
+        
+        print("\n=== SCALARS SANITY CHECK ===")
+        # Cicliamo sulle 4 proprietà fisiche del cluster
+        for idx in range(p_scal_flat.shape[-1]):
+            p_mean = p_scal_flat[:, idx].mean().item()
+            p_std  = p_scal_flat[:, idx].std().item()
+            t_mean = t_scal_flat[:, idx].mean().item()
+            t_std  = t_scal_flat[:, idx].std().item()
+            
+            print(f"Scalare [{idx}]:")
+            print(f"  -> PREDICTED : Media = {p_mean:12.4f} | Std = {p_std:12.4f}")
+            print(f"  -> EXPERIMENTAL: Media = {t_mean:12.4f} | Std = {t_std:12.4f}")
+        print("============================\n")
+        
     # --------------------------------
     # latent near-identity
     # --------------------------------
     L_transport = (
         delta_h.pow(2)
     ).mean()
-
-    
-    # --------------------------------
-    # spatial loss
-    # --------------------------------
-    L_spatial = spatial_gradient_loss(
-        pred_n,
-        data_n
-    )
     
     # ------------------------------------------------------------
     # total variation loss and smoothness (to reduce pixels jumps)
@@ -569,7 +573,7 @@ def compute_cygno_loss(
     # --------------------------------
     loss = (
 
-        0.5 * L_mmd
+        1.0 * L_mmd
         +
         0.1 * L_integral
         +
@@ -578,8 +582,6 @@ def compute_cygno_loss(
         0.001 * L_aux
         +
         0.0 * L_transport
-        +
-        0.0 * L_spatial # remove for now. Do NOT turn it ON !
         +
         0.1 * L_tv
         +
@@ -595,7 +597,6 @@ def compute_cygno_loss(
         "rms": L_rms.item(),
         "aux": L_aux.item(),
         "transport": L_transport.item(),
-        "spatial": L_spatial.item(),
         "totvar": L_tv.item(),
         "laplace": L_tv.item(),
         "identity": L_identity.item() if isinstance(L_identity, torch.Tensor) else 0.0
@@ -622,7 +623,6 @@ def train_epoch(
         "rms": [],
         "aux": [],
         "transport": [],
-        "spatial": [],
         "totvar": [],
         "laplace": [],
         "delta_h": [],
@@ -642,78 +642,48 @@ def train_epoch(
         if ibatch % 10 == 0:
             print (f"\t\t  running ibatch {ibatch}...")
     
-        sim = batch[
-            "sim_images"
-        ].to(device)
+        sim_images = batch["sim_images"].to(device)
+        data_images = batch["data_images"].to(device)
 
-        data = batch[
-            "data_images"
-        ].to(device)
+        sim_cond = batch["sim_cond"].to(device)
+        data_cond = batch["data_cond"].to(device)
 
-        sim_cond = batch[
-            "sim_cond"
-        ].to(device)
+        sim_scalars_raw = batch["sim_scalars"].to(device)
+        data_scalars_raw = batch["data_scalars"].to(device)
 
-        data_cond = batch[
-            "data_cond"
-        ].to(device)
+        B, N, H, W = sim_images.shape
+        num_scal = sim_scalars_raw.shape[-1] # Numero di scalari totali ordinati alfabeticamente
 
-        data_scalars = batch[
-            "data_scalars"
-        ].to(device)
+        # Appiatto le dimensioni spaziali e dei micro-batch per la rete
+        sim_flat = sim_images.view(B * N, 1, H, W)
+        sim_cond_flat = (sim_cond.repeat_interleave(N, dim=0))
+        data_cond_flat = (data_cond.repeat_interleave(N, dim=0))
 
-        B, N, H, W = sim.shape
+        sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
+        data_scalars_flat = data_scalars_raw.view(B * N, num_scal)
+        
+        out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
 
-        sim = sim.view(
-            B * N,
-            1,
-            H,
-            W
-        )
-
-        sim_cond = (
-            sim_cond
-            .repeat_interleave(
-                N,
-                dim=0
-            )
-        )
-
-        data_cond = (
-            data_cond
-            .repeat_interleave(
-                N,
-                dim=0
-            )
-        )
-
-        out = model(
-            sim,
-            sim_cond,
-            data_cond
-        )
-
-        pred = out["pred"].view(B,N,H,W)
+        pred = out["pred"]                  # Shape: [B*N, 1, 64, 64]
+        pred_scalars = out["pred_scalars"]  # Shape: [B*N, num_scal]
+        target_scalars = data_scalars_flat  # Shape: [B*N, num_scal]
 
         # to force DeltaH=0 for same input/output conditions (sim_cond)
-        out_identity = model(
-            sim,
-            sim_cond,
-            sim_cond
-        )
+        out_identity = model(sim_flat, sim_cond_flat, sim_cond_flat, sim_scalars_flat)
 
-        pred_identity = out_identity["pred"].view(B, N, H, W)
+        pred_identity = out_identity["pred"]
         
         #print(f"\t\t\t ---> pred sum: {pred.sum().item()}, data sum: {data.sum().item()}")
         
         loss, info = (
             compute_cygno_loss(
                 pred,
-                data,
-                data_scalars,
+                data_images,
+                pred_scalars,
+                target_scalars,
                 delta_h=out["delta_h"],
                 pred_identity=pred_identity,
-                sim_images=sim.view(B, N, H, W)
+                sim_images=sim_images
             )
         )
         
@@ -769,12 +739,6 @@ def train_epoch(
         )
 
         epoch_stats[
-            "spatial"
-        ].append(
-            info["spatial"]
-        )
-
-        epoch_stats[
             "totvar"
         ].append(
             info["totvar"]
@@ -826,9 +790,16 @@ def train_model(inputfile,outputfile,epochs=10):
         inputfile
     )
 
+    # to get the # of scalars
+    sample_batch = next(iter(loader))
+    n_scalar_features = sample_batch["sim_scalars"].shape[-1] 
+    print(f"Found {n_scalar_features} scalars in the dataset. Initialize the model now...")
+    
     model = (
-        CygnoTransportModel()
-        .to(device)
+        CygnoTransportModel(latent_dim=128, 
+                            cond_dim=64, 
+                            num_scalars=n_scalar_features
+                            ).to(device)
     )
 
     optimizer = torch.optim.Adam(
@@ -843,7 +814,6 @@ def train_model(inputfile,outputfile,epochs=10):
         "integral": [],
         "rms": [],
         "transport": [],
-        "spatial": [],
         "totvar": [],
         "laplace": [],
         "delta_h": []
@@ -1085,16 +1055,27 @@ def test_training(
     fig, ax = plt.subplots(10, 3, figsize=(9, 20))
     
     for i in range(10):
-        # Spaziamo i colori dinamicamente per ogni riga
-        vmax = max(test_sims[i].max().item(), test_preds[i].max().item())
+
+        # Troviamo il massimo assoluto di intensità per QUESTA specifica riga
+        # escludendo 'data' se ha una dinamica completamente fuori scala, 
+        # o includendolo per un confronto assoluto.
+        vmax = max(
+            test_sims[i].max().item(),
+            test_preds[i].max().item(),
+            test_datas[i].max().item()
+        )
+        # Se preferisci vedere le shape normalizzate alla loro intensità usa il vmax locale,
+        # ma per vedere la scala z reale usiamo questo vmax unico per la riga:
         
-        ax[i,0].imshow(test_sims[i], origin="lower", vmax=vmax)
+        ax[i,0].imshow(test_sims[i], origin="lower", vmin=0, vmax=vmax, cmap='viridis')
         ax[i,0].set_title(f"SIM (Batch {i})") if i==0 else None
         
-        ax[i,1].imshow(test_preds[i], origin="lower", vmax=vmax)
+        ax[i,1].imshow(test_preds[i], origin="lower", vmin=0, vmax=vmax, cmap='viridis')
         ax[i,1].set_title(f"CORRECTED (Batch {i})") if i==0 else None
         
-        ax[i,2].imshow(test_datas[i], origin="lower")
+        # Nota: se i DATI reali hanno un guadagno intrinseco totalmente diverso, 
+        # conviene lasciargli il suo vmax per studiare la shape, altrimenti mettiamo vmax anche qui
+        ax[i,2].imshow(test_datas[i], origin="lower", vmin=0, vmax=vmax, cmap='viridis')
         ax[i,2].set_title(f"DATA (Batch {i})") if i==0 else None
         
     plt.tight_layout()
