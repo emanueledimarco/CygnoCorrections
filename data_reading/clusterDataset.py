@@ -27,7 +27,8 @@ class ConditionalClusterDataset(Dataset):
         self.sim_dict = dataset_bundle["sim"]
         self.data_dict = dataset_bundle["data"]
         self.metadata = dataset_bundle.get("metadata", {})
-
+        self.target_scalars = [v.replace("sc_","") for v in self.metadata["features"]["flow_scalar_variables"]]
+        
         # ---------------------------------
         # group keys by z
         # ---------------------------------
@@ -72,27 +73,33 @@ class ConditionalClusterDataset(Dataset):
         return self.dataset_length
 
 
-    def cluster_scalars_to_tensor(self, cluster):
+    def cluster_scalars_to_tensor(self, cluster, keys_to_include=None):
+        """
+        Estrae gli scalari ordinati alfabeticamente.
+        Se 'keys_to_include' è una lista/set di stringhe, estrae SOLO quelle chiavi
+        per il calcolo della loss, ignorando le variabili di selezione o i metadati.
+        """
         excluded = {"pix", "cond", "meta"}
         values = []
      
-        # Ordiniamo alfabeticamente le chiavi per garantire il determinismo totale
-        for k in sorted(cluster.__dict__.keys()):
+        # Selezioniamo le chiavi: o quelle esplicite (white-list) o tutte quelle nel dizionario
+        available_keys = cluster.__dict__.keys()
+        if keys_to_include is not None:
+            # Prendiamo solo l'intersezione tra quelle richieste e quelle realmente presenti
+            keys_to_process = [k for k in keys_to_include if k in available_keys]
+        else:
+            keys_to_process = [k for k in available_keys if k not in excluded]
      
-            if k in excluded:
-                continue
-     
+        # Ordiniamo alfabeticamente per garantire il determinismo totale
+        for k in sorted(keys_to_process):
             v = cluster.__dict__[k]
-            if np.isscalar(v) and not isinstance(v, (str, bool)):
+            if np.isscalar(v):
                 values.append(float(v))
      
-        return torch.tensor(
-            values,
-            dtype=torch.float32
-        )
+        return torch.tensor(values, dtype=torch.float32)
     
 
-    def clusters_to_tensors(self, clusters):
+    def clusters_to_tensors(self, clusters, keys_to_include=None):
 
         pix = []
         scalars = []
@@ -109,7 +116,7 @@ class ConditionalClusterDataset(Dataset):
 
             pix.append(p)
 
-            scalars.append(self.cluster_scalars_to_tensor(c)
+            scalars.append(self.cluster_scalars_to_tensor(c,keys_to_include)
             )
 
         return pix, torch.stack(scalars)

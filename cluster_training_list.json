@@ -1,11 +1,17 @@
 {
-    "var_scalar_list": [
+    "all_cluster_variables": [
 	"sc_integral",
 	"sc_rms",
 	"sc_length",
 	"sc_width",
 	"sc_xmean",
 	"sc_ymean",
+	"sc_nhits"
+    ],
+    "target_cluster_variables": [
+	"sc_integral",
+	"sc_length",
+	"sc_width",
 	"sc_nhits"
     ]
 }

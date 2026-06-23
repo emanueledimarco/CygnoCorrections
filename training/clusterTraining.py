@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
+import os
 
 from data_reading.clusterDataset import ConditionalClusterDataset
 from data_reading.read_data_2D import make_cygno_collate_fn
@@ -356,9 +357,15 @@ def build_dataloader(
 
 
 def compute_mmd_rbf(X, Y):
+    # Spostiamo temporaneamente i due piccoli vettori delle feature su CPU
+    device_originale = X.device
+    X = X.cpu()
+    Y = Y.cpu()
+    
     B_X = X.size(0)
     B_Y = Y.size(0)
     
+    # Ora cdist gira su CPU dove il backward è perfettamente supportato!
     XX = torch.cdist(X, X, p=2).pow(2)
     YY = torch.cdist(Y, Y, p=2).pow(2)
     XY = torch.cdist(X, Y, p=2).pow(2)
@@ -373,7 +380,10 @@ def compute_mmd_rbf(X, Y):
     K_XY = torch.exp(-gamma * XY)
     
     mmd = K_XX.sum() / (B_X * (B_X - 1) + 1e-6) + K_YY.sum() / (B_Y * (B_Y - 1) + 1e-6) - 2 * K_XY.sum() / (B_X * B_Y + 1e-6)
-    return mmd
+    
+    # Riportiamo il valore scalare della loss sul device originale (MPS)
+    # per sommarlo coerentemente alle altre loss
+    return mmd.to(device_originale)
 
 
 def total_variation(x):
@@ -435,20 +445,28 @@ def compute_cygno_loss(
     sim_images=None
 ):
 
-    # 1. Portiamo subito i tensori in formato Flat [StepTotati, H, W] 
-    # per non fare confusione con B e N nelle loss statistiche
-    # pred shape nativa: [B, N, H, W] -> diventerà [B*N, H, W]
-    pred_flat = pred.view(-1, pred.shape[-2], pred.shape[-1])
-    data_flat = data.view(-1, data.shape[-2], data.shape[-1])
-
-    # 2. Pulizia dei dati reali dai pixel negativi (Noise Clamping)
-    # Importante: i dati simulati sono già positivi (grazie a ELU+1), 
+    # Pulizia dei dati reali dai pixel negativi (Noise Clamping)
     # ma i dati reali hanno fluttuazioni negative del piedistallo.
-    data_flat = torch.clamp(data_flat, min=0.0)
+    data = torch.clamp(data, min=0.0)
 
-    # 3. Normalizzazione a densità probabilistica spaziale (Somma = 1 per ogni singolo cluster)
-    pred_n = pred_flat / (pred_flat.sum(dim=(-1, -2), keepdim=True) + 1e-8)
-    data_n = data_flat / (data_flat.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    # CLAMPING E CONSISTENZA FISICA DEI PIXEL ---
+    # Garantiamo che tutte le intensità predette siano strettamente >= 0
+    pred_clamped = F.elu(pred) + 1.0
+
+    # ------------------------------------------------------------
+    # Indentity loss (Autoencoder)
+    # ------------------------------------------------------------
+    L_identity = 0.0
+    if pred_identity is not None and sim_images is not None:
+        # Applichiamo il softplus anche qui per consistenza con l'output intensità
+        pred_id_clamped = F.elu(pred_identity) + 1
+        # Semplice MSE a livello di pixel tra l'input SIM e la sua ricostruzione
+        L_identity = F.mse_loss(pred_id_clamped, sim_images)
+
+    
+    # Normalizzazione a densità probabilistica spaziale (Somma = 1 per ogni singolo cluster)
+    pred_n = pred_clamped / (pred_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    data_n = data / (data.sum(dim=(-1, -2), keepdim=True) + 1e-8)
 
     # print("SHAPE CHECK:")
     # print("pred_n shape:", pred_n.shape)  # Deve essere [B*N, 1, 64, 64] o [B, N, 64, 64]
@@ -467,36 +485,16 @@ def compute_cygno_loss(
     # --------------------------------
     # physics constraints
     # --------------------------------
-    pred_integral = pred.sum(
-        dim=(-1, -2)
-    )
-
-    data_integral = data.sum(
-        dim=(-1, -2)
-    )
-
-    L_integral = (
-        pred_integral
-        -
-        data_integral
-    ).pow(2).mean()
+    pred_integral = pred_clamped.sum(dim=(-1, -2))
+    data_integral = data.sum(dim=(-1, -2))
+    L_integral = (pred_integral - data_integral).pow(2).mean()
 
     # normalize to the number of elements
-    L_integral = L_integral / pred.numel()
+    L_integral = L_integral / pred_clamped.numel()
 
-    pred_rms = torch.sqrt(
-        (pred ** 2).mean(dim=(-1,-2))
-    )
-
-    data_rms = torch.sqrt(
-        (data ** 2).mean(dim=(-1,-2))
-    )
-    
-    L_rms = (
-        pred_rms
-        -
-        data_rms
-    ).pow(2).mean()
+    pred_rms = torch.sqrt((pred_clamped ** 2).mean(dim=(-1,-2)))
+    data_rms = torch.sqrt((data ** 2).mean(dim=(-1,-2)))
+    L_rms = (pred_rms - data_rms).pow(2).mean()
 
     # --------------------------------
     # auxiliary scalar supervision
@@ -515,64 +513,27 @@ def compute_cygno_loss(
         mean_pred / (mean_tgt + 1e-5), 
         mean_tgt / (mean_tgt + 1e-5)
     )
-    
     L_scalars_std = F.mse_loss(
         std_pred / (std_tgt + 1e-5), 
         std_tgt / (std_tgt + 1e-5)
     )
-    
     L_aux = L_scalars_mean + L_scalars_std
-
-    # ------------------------------------------------------------
-    # SANITY CHECK DELLE VARIABILI SCALARI
-    # ------------------------------------------------------------
-    with torch.no_grad():
-        # Portiamo i tensori in formato flat per analizzarli
-        # pred_scalars e target_scalars hanno shape [B, N, 4] -> passiamo a [B*N, 4]
-        p_scal_flat = pred_scalars.view(-1, pred_scalars.shape[-1])
-        t_scal_flat = target_scalars.view(-1, target_scalars.shape[-1])
-        
-        print("\n=== SCALARS SANITY CHECK ===")
-        # Cicliamo sulle 4 proprietà fisiche del cluster
-        for idx in range(p_scal_flat.shape[-1]):
-            p_mean = p_scal_flat[:, idx].mean().item()
-            p_std  = p_scal_flat[:, idx].std().item()
-            t_mean = t_scal_flat[:, idx].mean().item()
-            t_std  = t_scal_flat[:, idx].std().item()
-            
-            print(f"Scalare [{idx}]:")
-            print(f"  -> PREDICTED : Media = {p_mean:12.4f} | Std = {p_std:12.4f}")
-            print(f"  -> EXPERIMENTAL: Media = {t_mean:12.4f} | Std = {t_std:12.4f}")
-        print("============================\n")
         
     # --------------------------------
     # latent near-identity
     # --------------------------------
-    L_transport = (
-        delta_h.pow(2)
-    ).mean()
+    L_transport = (delta_h.pow(2)).mean()
     
     # ------------------------------------------------------------
     # total variation loss and smoothness (to reduce pixels jumps)
     # ------------------------------------------------------------
-    L_tv = total_variation(pred)
-    L_lap = laplacian_smoothness(pred)
+    L_tv = total_variation(pred_clamped)
+    L_lap = laplacian_smoothness(pred_clamped)
 
-    # ------------------------------------------------------------
-    # Nuova Loss di Identità (Autoencoder)
-    # ------------------------------------------------------------
-    L_identity = 0.0
-    if pred_identity is not None and sim_images is not None:
-        # Applichiamo il softplus anche qui per consistenza con l'output intensità
-        pred_id_clamped = F.elu(pred_identity) + 1
-        # Semplice MSE a livello di pixel tra l'input SIM e la sua ricostruzione
-        L_identity = F.mse_loss(pred_id_clamped, sim_images)
-        
     # --------------------------------
     # final weighted loss
     # --------------------------------
     loss = (
-
         1.0 * L_mmd
         +
         0.1 * L_integral
@@ -607,12 +568,11 @@ def compute_cygno_loss(
 
 
 # === TRAINING EPOCH ===
-def train_epoch(
-        model,
-        loader,
-        optimizer,
-        device="mps",
-        max_batches=None):
+import numpy as np
+import torch
+
+
+def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
 
     model.train()
 
@@ -626,22 +586,19 @@ def train_epoch(
         "totvar": [],
         "laplace": [],
         "delta_h": [],
-        "identity": []
+        "identity": [],
     }
-    
 
     print(f"\n\tNumber of batches in this epoch: {len(loader)}")
 
     for ibatch, batch in enumerate(loader):
-        
-        if (max_batches is not None
-            and ibatch >= max_batches
-            ):
+
+        if max_batches is not None and ibatch >= max_batches:
             break
 
         if ibatch % 10 == 0:
-            print (f"\t\t  running ibatch {ibatch}...")
-    
+            print(f"\t\t  running ibatch {ibatch}...")
+
         sim_images = batch["sim_images"].to(device)
         data_images = batch["data_images"].to(device)
 
@@ -652,128 +609,128 @@ def train_epoch(
         data_scalars_raw = batch["data_scalars"].to(device)
 
         B, N, H, W = sim_images.shape
-        num_scal = sim_scalars_raw.shape[-1] # Numero di scalari totali ordinati alfabeticamente
+        num_scal = sim_scalars_raw.shape[-1]
 
-        # Appiatto le dimensioni spaziali e dei micro-batch per la rete
-        sim_flat = sim_images.view(B * N, 1, H, W)
-        sim_cond_flat = (sim_cond.repeat_interleave(N, dim=0))
-        data_cond_flat = (data_cond.repeat_interleave(N, dim=0))
+        # Inizializziamo gli accumulatori per sommare le loss e le metriche di questo macro-batch
+        loss_batch_accumulata = 0.0
+        delta_h_norm_accumulata = 0.0
 
-        sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
-        data_scalars_flat = data_scalars_raw.view(B * N, num_scal)
-        
-        out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
+        # Struttura di appoggio per fare la media dei dizionari 'info' dell'evento
+        info_batch_accumulato = {
+            "total": 0.0,
+            "mmd": 0.0,
+            "integral": 0.0,
+            "rms": 0.0,
+            "aux": 0.0,
+            "transport": 0.0,
+            "totvar": 0.0,
+            "laplace": 0.0,
+            "identity": 0.0,
+        }
 
-        pred = out["pred"]                  # Shape: [B*N, 1, 64, 64]
-        pred_scalars = out["pred_scalars"]  # Shape: [B*N, num_scal]
-        target_scalars = data_scalars_flat  # Shape: [B*N, num_scal]
-
-        # to force DeltaH=0 for same input/output conditions (sim_cond)
-        out_identity = model(sim_flat, sim_cond_flat, sim_cond_flat, sim_scalars_flat)
-
-        pred_identity = out_identity["pred"]
-        
-        #print(f"\t\t\t ---> pred sum: {pred.sum().item()}, data sum: {data.sum().item()}")
-        
-        loss, info = (
-            compute_cygno_loss(
-                pred,
-                data_images,
-                pred_scalars,
-                target_scalars,
-                delta_h=out["delta_h"],
-                pred_identity=pred_identity,
-                sim_images=sim_images
-            )
-        )
-        
+        # Resettiamo i gradienti una volta sola all'inizio del macro-batch
         optimizer.zero_grad()
 
-        loss.backward()
+        # ============================================================
+        # LOOP ISOLATO SUL SINGOLO EVENTO/CONTESTO REALISTICO (b)
+        # ============================================================
+        for b in range(B):
+            # 1. Isolamento dei 32 cluster dell'evento coerente b
+            s_img = sim_images[b].unsqueeze(1)  # Shape: [N, 1, H, W]
+            d_img = data_images[b].unsqueeze(1)  # Shape: [N, 1, H, W]
 
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(),
-            1.0
-        )
+            # 2. Espansione locale dei contesti
+            s_cond = sim_cond[b].unsqueeze(0).repeat(N, 1)  # Shape: [N, cond_dim]
+            d_cond = data_cond[b].unsqueeze(0).repeat(N, 1)  # Shape: [N, cond_dim]
+
+            # 3. Scalari dell'evento
+            s_scal = sim_scalars_raw[b]  # Shape: [N, num_scal]
+            d_scal = data_scalars_raw[b]  # Shape: [N, num_scal]
+
+            # 4. Forward mirato del Trasporto Condizionale
+            out = model(s_img, s_cond, d_cond, s_scal)
+
+            pred_flat = out["pred"]
+            pred_scalars_raw = out["pred_scalars"]
+            # Clamping fisico di sicurezza per le variabili strettamente positive (es. Scalare [1])
+            pred_scalars = torch.clamp(pred_scalars_raw, min=0.0)
+
+            # ------------------------------------------------------------
+            # SANITY CHECK DELLE VARIABILI SCALARI
+            # ------------------------------------------------------------
+            # with torch.no_grad():
+            #     print("\n=== SCALARS SANITY CHECK ===")
+            #     print(f"SIM cond = \n {sim_cond}") 
+            #     print(f"DATA cond = \n {data_cond}") 
+            #     # Cicliamo sulle 4 proprietà fisiche del cluster
+            #     for idx in range(pred_scalars.shape[-1]):
+            #         s_mean = s_scal[:, idx].mean().item()
+            #         s_std  = s_scal[:, idx].std().item()                
+            #         p_mean = pred_scalars[:, idx].mean().item()
+            #         p_std  = pred_scalars[:, idx].std().item()
+            #         t_mean = d_scal[:, idx].mean().item()
+            #         t_std  = d_scal[:, idx].std().item()
+                
+            #         print(f"Scalare [{idx}]:")
+            #         print(f"  -> SIMULATION : Media = {s_mean:12.4f} | Std = {s_std:12.4f}")
+            #         print(f"  -> PREDICTED : Media = {p_mean:12.4f} | Std = {p_std:12.4f}")
+            #         print(f"  -> EXPERIMENTAL: Media = {t_mean:12.4f} | Std = {t_std:12.4f}")
+            #     print("============================\n")
+
+            
+            # 5. Forward dell'identità (stesso contesto di partenza/arrivo per forzare delta_h = 0)
+            out_identity = model(s_img, s_cond, s_cond, s_scal)
+            pred_identity = out_identity["pred"]
+
+            # 6. Calcolo della Loss isolata e protetta per la coppia b-esima
+            loss_evento, info_evento = compute_cygno_loss(
+                pred=pred_flat,
+                data=d_img,
+                pred_scalars=pred_scalars,
+                target_scalars=d_scal,
+                delta_h=out["delta_h"],
+                pred_identity=pred_identity,
+                sim_images=s_img,
+            )
+
+            # 7. Accumulo dei contributi pesati (dividiamo per B per fare la media aritmetica corretta)
+            loss_batch_accumulata += loss_evento / B
+            delta_h_norm_accumulata += out["delta_h"].norm().item() / B
+
+            for k in info_batch_accumulato.keys():
+                info_batch_accumulato[k] += info_evento[k] / B
+
+        # ============================================================
+        # BACKWARD E OTTIMIZZAZIONE (Una sola volta per macro-batch)
+        # ============================================================
+        # loss_batch_accumulata contiene ora i gradienti mediati di entrambi gli eventi, perfettamente isolati
+        loss_batch_accumulata.backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         optimizer.step()
 
-        # ------------------------
-        # accumulate stats
-        # ------------------------
-
-        epoch_stats[
-            "loss"
-        ].append(
-            info["total"]
-        )
-
-        epoch_stats[
-            "mmd"
-        ].append(
-            info["mmd"]
-        )
-
-        epoch_stats[
-            "integral"
-        ].append(
-            info["integral"]
-        )
-
-        epoch_stats[
-            "rms"
-        ].append(
-            info["rms"]
-        )
-
-        epoch_stats[
-            "aux"
-        ].append(
-            info["aux"]
-        )
-
-        epoch_stats[
-            "transport"
-        ].append(
-            info["transport"]
-        )
-
-        epoch_stats[
-            "totvar"
-        ].append(
-            info["totvar"]
-        )
-
-        epoch_stats[
-            "laplace"
-        ].append(
-            info["laplace"]
-        )
-
-        epoch_stats[
-            "identity"
-        ].append(
-            info["identity"]
-        )
-
-        epoch_stats[
-            "delta_h"
-        ].append(
-            out["delta_h"]
-            .norm()
-            .item()
-        )
+        # ------------------------------------------------------------
+        # ACCUMULO STATISTICHE DELL'EPOCA
+        # ------------------------------------------------------------
+        epoch_stats["loss"].append(info_batch_accumulato["total"])
+        epoch_stats["mmd"].append(info_batch_accumulato["mmd"])
+        epoch_stats["integral"].append(info_batch_accumulato["integral"])
+        epoch_stats["rms"].append(info_batch_accumulato["rms"])
+        epoch_stats["aux"].append(info_batch_accumulato["aux"])
+        epoch_stats["transport"].append(info_batch_accumulato["transport"])
+        epoch_stats["totvar"].append(info_batch_accumulato["totvar"])
+        epoch_stats["laplace"].append(info_batch_accumulato["laplace"])
+        epoch_stats["identity"].append(info_batch_accumulato["identity"])
+        epoch_stats["delta_h"].append(delta_h_norm_accumulata)
 
     # ------------------------
     # epoch average
     # ------------------------
-    epoch_stats = {
-        k: np.mean(v)
-        for k, v in
-        epoch_stats.items()
-    }
+    epoch_stats = {k: np.mean(v) for k, v in epoch_stats.items()}
 
     return epoch_stats
+
 
 
 # === FULL TRAINING ===
@@ -786,7 +743,7 @@ def train_model(inputfile,outputfile,epochs=10):
         else "cpu"
     )
 
-    _, loader = build_dataloader(
+    dataset, loader = build_dataloader(
         inputfile
     )
 
@@ -794,6 +751,7 @@ def train_model(inputfile,outputfile,epochs=10):
     sample_batch = next(iter(loader))
     n_scalar_features = sample_batch["sim_scalars"].shape[-1] 
     print(f"Found {n_scalar_features} scalars in the dataset. Initialize the model now...")
+    print(f"They correspond to the variables: {dataset.target_scalars}")
     
     model = (
         CygnoTransportModel(latent_dim=128, 
@@ -937,73 +895,47 @@ def test_training(
     # -----------------------
     # dataloader
     # -----------------------
-    _, loader = build_dataloader(inputfile, batch_size=2) # <--- Metti a 2!
+    dataset, loader = build_dataloader(inputfile, batch_size=10) # <--- Metti a 2!
     batch = next(iter(loader))
 
-    sim = batch[
-        "sim_images"
-    ].to(device)
+    sim = batch["sim_images"].to(device)
+    data = batch["data_images"].to(device)
 
-    data = batch[
-        "data_images"
-    ].to(device)
+    sim_cond = batch["sim_cond"].to(device)
+    data_cond = batch["data_cond"].to(device)
 
-    sim_cond = batch[
-        "sim_cond"
-    ].to(device)
-
-    data_cond = batch[
-        "data_cond"
-    ].to(device)
-
+    sim_scalars_raw = batch["sim_scalars"].to(device)
+    num_scal = sim_scalars_raw.shape[-1] # Numero di scalari totali ordinati alfabeticamente
+    
     B, N, H, W = sim.shape
 
-    sim_flat = sim.view(
-        B * N,
-        1,
-        H,
-        W
-    )
+    sim_flat = sim.view(B * N, 1, H, W)
+    data_flat = data.view(B * N, 1, H, W)
+    
+    sim_cond_flat = (sim_cond.repeat_interleave(N, dim=0))
+    data_cond_flat = (data_cond.repeat_interleave(N, dim=0))
 
-    sim_cond = (
-        sim_cond
-        .repeat_interleave(
-            N,
-            dim=0
-        )
-    )
-
-    data_cond = (
-        data_cond
-        .repeat_interleave(
-            N,
-            dim=0
-        )
-    )
+    sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
 
     with torch.no_grad():
+        out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
 
-        out = model(
-            sim_flat,
-            sim_cond,
-            data_cond
-        )
-
-    pred = out["pred"].view(
-        B,
-        N,
-        H,
-        W
-    )
-
+    # 1. Ricostruisci la struttura a blocchi per le immagini
+    pred_clamped_flat = F.elu(out["pred"]) + 1.0
+    pred_images = pred_clamped_flat.view(B, N, H, W)
+    
+    # 2. Ricostruisci la struttura a blocchi per gli scalari
+    # Da [B*N, num_scalars] a [B, N, num_scalars]
+    pred_scalars = out["pred_scalars"].view(B, N, -1)
+    
     print("DEBUG TRA BATCH DIFFERENTI: ")
     # Confrontiamo l'evento 0 del batch 0 con l'evento 0 del batch 1
-    print(pred[0,0].mean(), pred[1,0].mean())
+    print(pred_images[0,0].mean(), pred_images[1,0].mean())
     
     corr = torch.corrcoef(
         torch.stack([
-            pred[0,0].flatten(),
-            pred[1,0].flatten()
+            pred_images[0,0].flatten(),
+            pred_images[1,0].flatten()
         ])
     )
     print("corcoeff vero:")
@@ -1033,6 +965,7 @@ def test_training(
             sim = batch["sim_images"].to(device)
             sim_cond = batch["sim_cond"].to(device)
             data_cond = batch["data_cond"].to(device)
+            sim_scalars_raw = batch["sim_scalars"].to(device)
             
             B, N, H, W = sim.shape
             sim_flat = sim.view(B * N, 1, H, W)
@@ -1040,15 +973,17 @@ def test_training(
             # Espandiamo le condizioni per il match flat
             sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
             data_cond_flat = data_cond.repeat_interleave(N, dim=0)
-            
+            sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
+
             # Forward
-            out = model(sim_flat, sim_cond_flat, data_cond_flat)
-            pred_flat = F.elu(out["pred"]) + 1.0
-            pred = pred_flat.view(B, N, H, W)
+            out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
+            pred_clamped_flat = F.elu(out["pred"]) + 1.0
+            pred_images = pred_clamped_flat.view(B, N, H, W)
+            pred_scalars = torch.clamp(out["pred_scalars"], min=0.0).view(B, N, -1)
             
             # Scegliamo il primo sotto-cluster (idx=0) di questo specifico batch
             test_sims.append(sim[0, 0].cpu())
-            test_preds.append(pred[0, 0].cpu())
+            test_preds.append(pred_images[0, 0].cpu())
             test_datas.append(batch["data_images"][0, 0].cpu())
 
     # Ora disegnamo le 10 righe, ognuna corrispondente a un BATCH differente
@@ -1080,5 +1015,280 @@ def test_training(
         
     plt.tight_layout()
     plt.show()
-    
-    
+
+    run_sampled_and_detailed_test(model,loader,dataset.target_scalars,device,max_batches=50,output_dir="plot/validation_plots")
+
+
+def run_sampled_and_detailed_test(
+    model,
+    test_loader,
+    whitelist,
+    device,
+    max_batches=50,
+    num_sim_ctx_to_sample=3,
+    num_data_ctx_to_sample=3,
+    save_individual_plots=False,
+    output_dir="plots",
+):
+    import matplotlib.pyplot as plt
+    """Accumula i dati di test, esegue un campionamento casuale dei contesti per una
+
+    griglia veloce (Csim x Cdata) e, se richiesto, salva grafici 1D separati ad
+    alta statistica per ogni combinazione.
+    """
+    model.eval()
+    os.makedirs(output_dir, exist_ok=True)
+
+    all_sim_scalars = []
+    all_pred_scalars = []
+    all_data_scalars = []
+    all_sim_cond = []
+    all_data_cond = []
+
+    # 1. ACCUMULO COMPLETO DELLE STATISTICHE DI TEST
+    print(f"Now accumulating statistics over max {max_batches} batches")
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            if batch_idx >= max_batches:
+                print(f"--> Raggiunto il limite massimo di {max_batches} batch per il test veloce.")
+                break
+            sim_images = batch["sim_images"].to(device)
+            data_images = batch["data_images"].to(device)
+            sim_cond = batch["sim_cond"].to(device)
+            data_cond = batch["data_cond"].to(device)
+            sim_scalars_raw = batch["sim_scalars"].to(device)
+            data_scalars_raw = batch["data_scalars"].to(device)
+
+            B, N, H, W = sim_images.shape
+            num_scal = sim_scalars_raw.shape[-1]
+
+            sim_flat = sim_images.view(B * N, 1, H, W)
+            sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
+            data_cond_flat = data_cond.repeat_interleave(N, dim=0)
+            sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
+            data_scalars_flat = data_scalars_raw.view(B * N, num_scal)
+
+            out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
+            pred_scalars_clamped = torch.clamp(out["pred_scalars"], min=0.0)
+
+            all_sim_scalars.append(sim_scalars_flat.cpu().numpy())
+            all_pred_scalars.append(pred_scalars_clamped.cpu().numpy())
+            all_data_scalars.append(data_scalars_flat.cpu().numpy())
+            all_sim_cond.append(sim_cond_flat.cpu().numpy())
+            all_data_cond.append(data_cond_flat.cpu().numpy())
+
+    # Concatenazione globale
+    sim_sc = np.concatenate(all_sim_scalars, axis=0)
+    pred_sc = np.concatenate(all_pred_scalars, axis=0)
+    data_sc = np.concatenate(all_data_scalars, axis=0)
+    sim_co = np.concatenate(all_sim_cond, axis=0)
+    data_co = np.concatenate(all_data_cond, axis=0)
+
+    sim_co_rounded = np.round(sim_co, decimals=2)
+    data_co_rounded = np.round(data_co, decimals=2)
+
+    # Trova tutti i contesti unici disponibili
+    unique_sim_ctx = np.unique(sim_co_rounded, axis=0)
+    unique_data_ctx = np.unique(data_co_rounded, axis=0)
+
+    # 2. SHUFFLING E SAMPLING DEI CONTESTI (Scelti da te)
+    print(f"Shuffling contextes for SIM and DATA to give test results on {num_sim_ctx_to_sample} SIM x {num_data_ctx_to_sample} DATA contextes")
+    np.random.shuffle(unique_sim_ctx)
+    np.random.shuffle(unique_data_ctx)
+
+    # Limitiamo il campionamento al minimo tra la richiesta e quanti ne esistono davvero
+    sampled_sim_ctx = unique_sim_ctx[: min(num_sim_ctx_to_sample, len(unique_sim_ctx))]
+    sampled_data_ctx = unique_data_ctx[: min(num_data_ctx_to_sample, len(unique_data_ctx))]
+
+    n_sampled_sim = len(sampled_sim_ctx)
+    n_sampled_data = len(sampled_data_ctx)
+
+    print(
+        f"Contesti totali nel dataset -> SIM: {len(unique_sim_ctx)}, DATA: {len(unique_data_ctx)}"
+    )
+    print(
+        f"Griglia di test campionata impostata a: {n_sampled_sim}x{n_sampled_data}"
+    )
+
+    # 3. MODALITÀ A: PLOT DELLE COPPIE REALI PRESENTI NEL TEST
+    # Troviamo tutte le combinazioni uniche di COPPIE (SIM, DATA) effettivamente esistenti
+    # Concateniamo i contesti per trovare le righe uniche della coppia
+    coppie_totali = np.hstack([sim_co_rounded, data_co_rounded])
+    coppie_uniche = np.unique(coppie_totali, axis=0)
+
+    # Shuffle delle coppie reali e selezione del numero massimo richiesto
+    np.random.shuffle(coppie_uniche)
+    num_coppie_da_mappare = min(
+        num_sim_ctx_to_sample * num_data_ctx_to_sample, len(coppie_uniche)
+    )
+    coppie_campionate = coppie_uniche[:num_coppie_da_mappare]
+
+    # Configura una griglia dinamica quadrata o rettangolare per le coppie reali
+    cols = num_data_ctx_to_sample
+    rows = (num_coppie_da_mappare + cols - 1) // cols
+
+    dim_cond_sim = sim_co.shape[-1]
+
+    for var_idx, var_name in enumerate(whitelist):
+        fig, axes = plt.subplots(
+            rows, cols, figsize=(4 * cols, 3.5 * rows)
+        )
+        axes = axes.flatten() if num_coppie_da_mappare > 1 else np.array([axes])
+
+        for idx, coppia in enumerate(coppie_campionate):
+            ax = axes[idx]
+
+            # Splittiamo la coppia nei due contesti originari
+            s_ctx = coppia[:dim_cond_sim]
+            d_ctx = coppia[dim_cond_sim:]
+
+            # Maschera basata sulla coincidenza esatta della coppia reale
+            mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-2).all(
+                axis=1
+            )
+            mask_data = np.isclose(
+                data_co_rounded, d_ctx, atol=1e-2
+            ).all(axis=1)
+            mask = mask_sim & mask_data
+
+            s_vals = sim_sc[mask, var_idx]
+            p_vals = pred_sc[mask, var_idx]
+            d_vals = data_sc[mask, var_idx]
+
+            s_ctx_clean = [round(float(x), 2) for x in s_ctx]
+            d_ctx_clean = [round(float(x), 2) for x in d_ctx]
+
+            bins = np.linspace(
+                min(s_vals.min(), p_vals.min(), d_vals.min()),
+                max(s_vals.max(), p_vals.max(), d_vals.max()),
+                30,
+            )
+            ax.hist(
+                s_vals,
+                bins=bins,
+                alpha=0.4,
+                label="SIM",
+                color="tab:blue",
+                density=True,
+            )
+            ax.hist(
+                p_vals,
+                bins=bins,
+                histtype="step",
+                linewidth=2,
+                label="CORR",
+                color="tab:orange",
+                density=True,
+            )
+            ax.hist(
+                d_vals,
+                bins=bins,
+                alpha=0.2,
+                label="DATA",
+                color="tab:green",
+                hatch="//",
+                density=True,
+            )
+
+            ax.set_title(
+                f"SIM: {s_ctx_clean}\n→ DATA: {d_ctx_clean}",
+                fontsize=9,
+                fontweight="bold",
+            )
+            ax.grid(True, linestyle="--", alpha=0.5)
+
+            if idx == 0:
+                ax.legend(loc="upper right", fontsize=8)
+
+        # Rimuoviamo i sotto-grafici vuoti in eccedenza nella griglia
+        for j in range(num_coppie_da_mappare, len(axes)):
+            fig.delaxes(axes[j])
+
+        plt.suptitle(
+            f"Distribuzioni Campionate per Coppie Reali - Variabile: {var_name.upper()}",
+            fontsize=12,
+            fontweight="bold",
+            y=1.02,
+        )
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(output_dir, f"matrix_sampled_{var_name}.png"),
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close()
+
+    # 4. MODALITÀ B: PLOT SINGOLI 1D AD ALTA STATISTICA (Per tutte le combinazioni reali)
+    if save_individual_plots:
+        print("--> Generazione dei plot 1D singoli per ogni contesto...")
+        # Iteriamo su TUTTI i contesti possibili per non perdere dettagli nel report finale
+        for s_ctx in unique_sim_ctx:
+            for d_ctx in unique_data_ctx:
+                mask = (sim_co_rounded == s_ctx).all(axis=1) & (
+                    data_co_rounded == d_ctx
+                ).all(axis=1)
+
+                # Se questa combinazione non ha cluster nel dataset, saltiamo
+                if not mask.any():
+                    continue
+
+                # Generiamo un file separato per ciascuna variabile di questa combinazione
+                for var_idx, var_name in enumerate(whitelist):
+                    s_vals = sim_sc[mask, var_idx]
+                    p_vals = pred_sc[mask, var_idx]
+                    d_vals = data_sc[mask, var_idx]
+
+                    plt.figure(figsize=(7, 5))
+                    bins = np.linspace(
+                        min(s_vals.min(), p_vals.min(), d_vals.min()),
+                        max(s_vals.max(), p_vals.max(), d_vals.max()),
+                        35,
+                    )
+
+                    plt.hist(
+                        s_vals,
+                        bins=bins,
+                        alpha=0.4,
+                        label=f"SIM {list(s_ctx)}",
+                        color="tab:blue",
+                        density=True,
+                    )
+                    plt.hist(
+                        p_vals,
+                        bins=bins,
+                        histtype="step",
+                        linewidth=2.5,
+                        label="CORR (Transported)",
+                        color="tab:orange",
+                        density=True,
+                    )
+                    plt.hist(
+                        d_vals,
+                        bins=bins,
+                        alpha=0.2,
+                        label=f"DATA {list(d_ctx)}",
+                        color="tab:green",
+                        hatch="//",
+                        density=True,
+                    )
+
+                    # Formattiamo i nomi dei file per evitare caratteri strani o spazi
+                    s_str = "_".join([str(x) for x in s_ctx])
+                    d_str = "_".join([str(x) for x in d_ctx])
+
+                    plt.title(
+                        f"Dettaglio {var_name.upper()}\nSIM:[{s_str}] → DATA:[{d_str}]",
+                        fontsize=10,
+                        fontweight="bold",
+                    )
+                    plt.xlabel("Valore Fisico Scalare")
+                    plt.ylabel("Densità di Probabilità")
+                    plt.grid(True, linestyle="--", alpha=0.5)
+                    plt.legend(loc="upper right")
+
+                    indiv_path = os.path.join(
+                        output_dir, f"{var_name}_SIM_{s_str}_DATA_{d_str}.png"
+                    )
+                    plt.savefig(indiv_path, dpi=150, bbox_inches="tight")
+                    plt.close()
+                    

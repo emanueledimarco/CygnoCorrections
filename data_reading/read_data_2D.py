@@ -42,8 +42,10 @@ def read_data_and_save(conf):
     with open("cluster_training_list.json", "r") as file:
         json_data = json.load(file)
         
-    variables = json_data["var_scalar_list"]
-    print("List of the veriables used in the flow for selection/validation:   ", variables)
+    all_cluster_variables = json_data["all_cluster_variables"]
+    print("List of all the variables that should be attached to the cluster object:   ", all_cluster_variables)
+    target_cluster_variables = json_data["target_cluster_variables"]
+    print("List of the variables that should be targeted by the flow:   ", target_cluster_variables)
     
     print(f"Now filling the datasets for the simulation and data. It applies the selection and converts them to panda DFs.  Since many files are involved, it takes time...")
 
@@ -63,12 +65,12 @@ def read_data_and_save(conf):
             if k=="sim":
                 print("\t==> Simulation now...")
                 for mapkey,files in map_dic.items():
-                    sim_clusters_dict[mapkey] = build_dataset_from_files(files, variables, mapkey, isdata=False)
+                    sim_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=False)
                     #break
             else:
                 print("\t==> Data now...")
                 for mapkey,files in map_dic.items():
-                    data_clusters_dict[mapkey] = build_dataset_from_files(files, variables, mapkey, isdata=True, selection_cfg=selection_cfg)
+                    data_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=True, selection_cfg=selection_cfg)
                     #break
 
     # save some metadata information
@@ -77,9 +79,11 @@ def read_data_and_save(conf):
         "description": "CYGNO cluster dataset for sim-data shape translation",
         
     }
+    
     metadata["features"] = {
         "pix": ["x_centered", "y_centered", "charge"],
-        "scalars": variables
+        "all_cluster_variables": all_cluster_variables,
+        "flow_scalar_variables": target_cluster_variables
     }
 
     metadata["conditioning"] = {
@@ -212,7 +216,7 @@ def make_cygno_collate_fn(dataset):
                 )
      
                 sim_sca.append(
-                    dataset.cluster_scalars_to_tensor(c)
+                    dataset.cluster_scalars_to_tensor(c,dataset.target_scalars)
                 )
      
             sim_images.append(
@@ -236,7 +240,7 @@ def make_cygno_collate_fn(dataset):
                 )
      
                 data_sca.append(
-                    dataset.cluster_scalars_to_tensor(c)
+                    dataset.cluster_scalars_to_tensor(c,dataset.target_scalars)
                 )
      
             data_images.append(
@@ -282,7 +286,7 @@ def data_loader_test(dataset):
     print("z:", batch["z"])
     print("sim_cond:", batch["sim_cond"].shape)
     print("data_cond:", batch["data_cond"].shape)
-
+    print("flow target scalar variables:",dataset.target_scalars)
 
 def image_test(sample):
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
