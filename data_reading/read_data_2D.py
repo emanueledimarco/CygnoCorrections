@@ -65,7 +65,7 @@ def read_data_and_save(conf):
             if k=="sim":
                 print("\t==> Simulation now...")
                 for mapkey,files in map_dic.items():
-                    sim_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=False)
+                    sim_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=False, selection_cfg=selection_cfg)
                     #break
             else:
                 print("\t==> Data now...")
