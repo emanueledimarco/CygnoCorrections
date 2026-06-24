@@ -257,7 +257,8 @@ def forward_test(inputfile):
 
     dataset = ConditionalClusterDataset(
         pkl_file=inputfile,
-        n_clusters=32
+        n_clusters=32,
+        is_test=True
     )
     
     loader = DataLoader(
@@ -333,16 +334,18 @@ def forward_test(inputfile):
 
 from torch.utils.data import DataLoader
 
-
 def build_dataloader(
         inputfile,
         batch_size=4,
         n_clusters=32,
-        shuffle=True):
+        shuffle=True,
+        is_test=False,
+):
 
     dataset = ConditionalClusterDataset(
         pkl_file=inputfile,
-        n_clusters=n_clusters
+        n_clusters=n_clusters,
+        is_test=is_test
     )
 
     loader = DataLoader(
@@ -895,7 +898,7 @@ def test_training(
     # -----------------------
     # dataloader
     # -----------------------
-    dataset, loader = build_dataloader(inputfile, batch_size=10) # <--- Metti a 2!
+    dataset, loader = build_dataloader(inputfile, batch_size=10, is_test=True) # <--- Metti a 2!
     batch = next(iter(loader))
 
     sim = batch["sim_images"].to(device)
@@ -1016,8 +1019,7 @@ def test_training(
     plt.tight_layout()
     plt.show()
 
-    run_sampled_and_detailed_test(model,loader,dataset.target_scalars,device,max_batches=50,output_dir="plot/validation_plots")
-
+    run_sampled_and_detailed_test(model,loader,dataset.target_scalars,device,max_batches=50,output_dir="plot/validation_plots",save_individual_plots=False)
 
 def run_sampled_and_detailed_test(
     model,
@@ -1031,9 +1033,9 @@ def run_sampled_and_detailed_test(
     output_dir="plots",
 ):
     import matplotlib.pyplot as plt
-    """Accumula i dati di test, esegue un campionamento casuale dei contesti per una
-
-    griglia veloce (Csim x Cdata) e, se richiesto, salva grafici 1D separati ad
+    import os
+    """Accumula i dati di test, esegue un campionamento deterministico/selezionato dei contesti per una
+    griglia veloce (Csim x Cdata) priva di mixing e, se richiesto, salva grafici 1D separati ad
     alta statistica per ogni combinazione.
     """
     model.eval()
@@ -1045,13 +1047,13 @@ def run_sampled_and_detailed_test(
     all_sim_cond = []
     all_data_cond = []
 
-    # 1. ACCUMULO COMPLETO DELLE STATISTICHE DI TEST
+    # 1. ACCUMULO VELOCE (TUTTO IN TORCH SU DEVICE)
     print(f"Now accumulating statistics over max {max_batches} batches")
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
-            if batch_idx >= max_batches:
-                print(f"--> Raggiunto il limite massimo di {max_batches} batch per il test veloce.")
+            if max_batches is not None and batch_idx >= max_batches:
                 break
+
             sim_images = batch["sim_images"].to(device)
             data_images = batch["data_images"].to(device)
             sim_cond = batch["sim_cond"].to(device)
@@ -1060,179 +1062,159 @@ def run_sampled_and_detailed_test(
             data_scalars_raw = batch["data_scalars"].to(device)
 
             B, N, H, W = sim_images.shape
-            num_scal = sim_scalars_raw.shape[-1]
 
-            sim_flat = sim_images.view(B * N, 1, H, W)
-            sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
-            data_cond_flat = data_cond.repeat_interleave(N, dim=0)
-            sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
-            data_scalars_flat = data_scalars_raw.view(B * N, num_scal)
+            for b in range(B):
+                s_img = sim_images[b].unsqueeze(1)
+                d_img = data_images[b].unsqueeze(1)
 
-            out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
-            pred_scalars_clamped = torch.clamp(out["pred_scalars"], min=0.0)
+                # Gestione shape cond senza passare da numpy
+                if len(sim_cond.shape) == 3:
+                    s_c = sim_cond[b]
+                    d_c = data_cond[b]
+                else:
+                    s_c = sim_cond[b].unsqueeze(0).repeat(N, 1)
+                    d_c = data_cond[b].unsqueeze(0).repeat(N, 1)
 
-            all_sim_scalars.append(sim_scalars_flat.cpu().numpy())
-            all_pred_scalars.append(pred_scalars_clamped.cpu().numpy())
-            all_data_scalars.append(data_scalars_flat.cpu().numpy())
-            all_sim_cond.append(sim_cond_flat.cpu().numpy())
-            all_data_cond.append(data_cond_flat.cpu().numpy())
+                s_scal = sim_scalars_raw[b]
+                d_scal = data_scalars_raw[b]
 
-    # Concatenazione globale
-    sim_sc = np.concatenate(all_sim_scalars, axis=0)
-    pred_sc = np.concatenate(all_pred_scalars, axis=0)
-    data_sc = np.concatenate(all_data_scalars, axis=0)
-    sim_co = np.concatenate(all_sim_cond, axis=0)
-    data_co = np.concatenate(all_data_cond, axis=0)
+                # Forward puramente su device
+                out = model(s_img, s_c, d_c, s_scal)
+                pred_scalars_clamped = torch.clamp(out["pred_scalars"], min=0.0)
 
-    sim_co_rounded = np.round(sim_co, decimals=2)
-    data_co_rounded = np.round(data_co, decimals=2)
+                # Accumuliamo i tensori così come sono su device
+                all_sim_scalars.append(s_scal)
+                all_pred_scalars.append(pred_scalars_clamped)
+                all_data_scalars.append(d_scal)
+                all_sim_cond.append(s_c)
+                all_data_cond.append(d_c)
 
-    # Trova tutti i contesti unici disponibili
-    unique_sim_ctx = np.unique(sim_co_rounded, axis=0)
-    unique_data_ctx = np.unique(data_co_rounded, axis=0)
+    # 2. CONVERSIONE IN NUMPY MASSIVA (Una volta sola alla fine)
+    sim_sc = torch.cat(all_sim_scalars, dim=0).cpu().numpy()
+    pred_sc = torch.cat(all_pred_scalars, dim=0).cpu().numpy()
+    data_sc = torch.cat(all_data_scalars, dim=0).cpu().numpy()
+    sim_co = torch.cat(all_sim_cond, dim=0).cpu().numpy()
+    data_co = torch.cat(all_data_cond, dim=0).cpu().numpy()
+    
+    sim_co_rounded = np.round(sim_co, decimals=4)
+    data_co_rounded = np.round(data_co, decimals=4)
 
-    # 2. SHUFFLING E SAMPLING DEI CONTESTI (Scelti da te)
-    print(f"Shuffling contextes for SIM and DATA to give test results on {num_sim_ctx_to_sample} SIM x {num_data_ctx_to_sample} DATA contextes")
-    np.random.shuffle(unique_sim_ctx)
-    np.random.shuffle(unique_data_ctx)
-
-    # Limitiamo il campionamento al minimo tra la richiesta e quanti ne esistono davvero
-    sampled_sim_ctx = unique_sim_ctx[: min(num_sim_ctx_to_sample, len(unique_sim_ctx))]
-    sampled_data_ctx = unique_data_ctx[: min(num_data_ctx_to_sample, len(unique_data_ctx))]
-
-    n_sampled_sim = len(sampled_sim_ctx)
-    n_sampled_data = len(sampled_data_ctx)
-
-    print(
-        f"Contesti totali nel dataset -> SIM: {len(unique_sim_ctx)}, DATA: {len(unique_data_ctx)}"
+    # 3. IDENTIFICAZIONE DELLE COPPIE REALI ED ESTRAZIONE DEGLI ASSI PER IL SUBSET
+    coppie_reali = np.unique(
+        np.hstack([sim_co_rounded, data_co_rounded]), axis=0
     )
-    print(
-        f"Griglia di test campionata impostata a: {n_sampled_sim}x{n_sampled_data}"
+    
+    all_unique_sim = np.unique(coppie_reali[:, :3], axis=0)
+    all_unique_data = np.unique(coppie_reali[:, 3:], axis=0)
+
+    print(f"Contesti totali nel dataset -> SIM: {len(all_unique_sim)}, DATA: {len(all_unique_data)}")
+
+    # Selezioniamo il subset N x M basandoci su num_sim_ctx_to_sample e num_data_ctx_to_sample
+    unique_sim_ctx = all_unique_sim[: min(num_sim_ctx_to_sample, len(all_unique_sim))]
+    unique_data_ctx = all_unique_data[: min(num_data_ctx_to_sample, len(all_unique_data))]
+
+    n_rows = len(unique_sim_ctx)
+    n_cols = len(unique_data_ctx)
+    print(f"Griglia di test campionata impostata a: {n_rows}x{n_cols}")
+
+    # --------------------------------------------------------
+    # MODALITÀ A: GENERAZIONE DELLE GRIGLIE PER OGNI VARIABILE
+    # --------------------------------------------------------
+    # Cerchiamo solo le combinazioni di (SIM, DATA) che sono EFFETTIVAMENTE presenti nel dataset
+    coppie_reali = np.unique(
+        np.hstack([sim_co_rounded, data_co_rounded]), axis=0
     )
+    
+    # Filtriamo solo le prime combinazioni per rientrare nei limiti richiesti (es. 3x3)
+    coppie_selezionate = coppie_reali[:(num_sim_ctx_to_sample * num_data_ctx_to_sample)]
+    
+    n_coppie = len(coppie_selezionate)
+    if n_coppie == 0:
+        print("[ATTENZIONE] Nessuna combinazione trovata nei dati di test acumulati.")
+        return
 
-    # 3. MODALITÀ A: PLOT DELLE COPPIE REALI PRESENTI NEL TEST
-    # Troviamo tutte le combinazioni uniche di COPPIE (SIM, DATA) effettivamente esistenti
-    # Concateniamo i contesti per trovare le righe uniche della coppia
-    coppie_totali = np.hstack([sim_co_rounded, data_co_rounded])
-    coppie_uniche = np.unique(coppie_totali, axis=0)
+    # Calcoliamo una disposizione flessibile per la griglia (massimo 3 o 4 colonne per riga)
+    n_cols = min(3, num_data_ctx_to_sample)
+    n_rows = (n_coppie + n_cols - 1) // n_cols
 
-    # Shuffle delle coppie reali e selezione del numero massimo richiesto
-    np.random.shuffle(coppie_uniche)
-    num_coppie_da_mappare = min(
-        num_sim_ctx_to_sample * num_data_ctx_to_sample, len(coppie_uniche)
-    )
-    coppie_campionate = coppie_uniche[:num_coppie_da_mappare]
-
-    # Configura una griglia dinamica quadrata o rettangolare per le coppie reali
-    cols = num_data_ctx_to_sample
-    rows = (num_coppie_da_mappare + cols - 1) // cols
-
-    dim_cond_sim = sim_co.shape[-1]
-
-    for var_idx, var_name in enumerate(whitelist):
+    for idx_var, var_name in enumerate(whitelist):
+        print(f"\t--> Generazione griglia elegante {n_rows}x{n_cols} per variabile: {var_name}...")
+        
         fig, axes = plt.subplots(
-            rows, cols, figsize=(4 * cols, 3.5 * rows)
+            n_rows,
+            n_cols,
+            figsize=(5 * n_cols, 4 * n_rows),
+            squeeze=False
         )
-        axes = axes.flatten() if num_coppie_da_mappare > 1 else np.array([axes])
+        
+        # Appiattiamo gli assi per ciclarci sopra linearmente in modo comodo
+        axes_flat = axes.flatten()
 
-        for idx, coppia in enumerate(coppie_campionate):
-            ax = axes[idx]
+        idx_coppia = -1
+        for idx_coppia, coppia in enumerate(coppie_selezionate):
+            ax = axes_flat[idx_coppia]
+            
+            # Scompattiamo le chiavi esatte
+            s_ctx = coppia[:3]
+            d_ctx = coppia[3:]
 
-            # Splittiamo la coppia nei due contesti originari
-            s_ctx = coppia[:dim_cond_sim]
-            d_ctx = coppia[dim_cond_sim:]
-
-            # Maschera basata sulla coincidenza esatta della coppia reale
-            mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-2).all(
-                axis=1
-            )
-            mask_data = np.isclose(
-                data_co_rounded, d_ctx, atol=1e-2
-            ).all(axis=1)
+            # Maschera super selettiva e pura
+            mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-5).all(axis=1)
+            mask_data = np.isclose(data_co_rounded, d_ctx, atol=1e-5).all(axis=1)
             mask = mask_sim & mask_data
 
-            s_vals = sim_sc[mask, var_idx]
-            p_vals = pred_sc[mask, var_idx]
-            d_vals = data_sc[mask, var_idx]
-
-            s_ctx_clean = [round(float(x), 2) for x in s_ctx]
-            d_ctx_clean = [round(float(x), 2) for x in d_ctx]
+            s_vals = sim_sc[mask, idx_var]
+            p_vals = pred_sc[mask, idx_var]
+            d_vals = data_sc[mask, idx_var]
 
             bins = np.linspace(
                 min(s_vals.min(), p_vals.min(), d_vals.min()),
                 max(s_vals.max(), p_vals.max(), d_vals.max()),
-                30,
-            )
-            ax.hist(
-                s_vals,
-                bins=bins,
-                alpha=0.4,
-                label="SIM",
-                color="tab:blue",
-                density=True,
-            )
-            ax.hist(
-                p_vals,
-                bins=bins,
-                histtype="step",
-                linewidth=2,
-                label="CORR",
-                color="tab:orange",
-                density=True,
-            )
-            ax.hist(
-                d_vals,
-                bins=bins,
-                alpha=0.2,
-                label="DATA",
-                color="tab:green",
-                hatch="//",
-                density=True,
+                30
             )
 
-            ax.set_title(
-                f"SIM: {s_ctx_clean}\n→ DATA: {d_ctx_clean}",
-                fontsize=9,
-                fontweight="bold",
-            )
-            ax.grid(True, linestyle="--", alpha=0.5)
+            # Disegno istogrammi con densità normalizzata
+            ax.hist(s_vals, bins=bins, alpha=0.5, histtype="step", linewidth=2, label="SIM", color="tab:blue", density=True)
+            ax.hist(p_vals, bins=bins, alpha=0.7, label="PRED", color="tab:orange", density=True)
+            ax.hist(d_vals, bins=bins, alpha=0.2, label="DATA", color="tab:green", hatch="//", density=True)
 
-            if idx == 0:
-                ax.legend(loc="upper right", fontsize=8)
+            # Formattazione pulita ed elegante dei titoli (es: Z=100, A=0.1 | P=900, H=0.5)
+            titolo_sim = f"SIM: z={int(s_ctx[0])}, α={s_ctx[1]:.2f}, λ={s_ctx[2]:.2f}"
+            titolo_data = f"DATA: z={int(d_ctx[0])}, P={int(d_ctx[1])}, T={d_ctx[2]:.1f}"
+            ax.set_title(f"{titolo_sim}\n{titolo_data}", fontsize=8, fontweight="bold")
+            
+            ax.grid(True, linestyle="--", alpha=0.4)
+            ax.tick_params(axis='both', which='major', labelsize=8)
+            
+            # Mettiamo la legenda su OGNI pannello attivo per chiarezza fisica
+            ax.legend(loc="upper right", fontsize=8)
 
-        # Rimuoviamo i sotto-grafici vuoti in eccedenza nella griglia
-        for j in range(num_coppie_da_mappare, len(axes)):
-            fig.delaxes(axes[j])
+        # Spegniamo i pannelli della griglia rimasti vuoti (se le coppie reali non riempiono perfettamente la matrice)
+        for idx_retro in range(idx_coppia + 1, len(axes_flat)):
+            axes_flat[idx_retro].axis('off')
 
-        plt.suptitle(
-            f"Distribuzioni Campionate per Coppie Reali - Variabile: {var_name.upper()}",
-            fontsize=12,
-            fontweight="bold",
-            y=1.02,
-        )
         plt.tight_layout()
-        plt.savefig(
-            os.path.join(output_dir, f"matrix_sampled_{var_name}.png"),
-            dpi=150,
-            bbox_inches="tight",
-        )
+        grid_path = os.path.join(output_dir, f"griglia_ottimizzata_{var_name}.png")
+        plt.savefig(grid_path, dpi=120, bbox_inches="tight")
         plt.close()
+        print(f"\t--> Griglia salvata con successo in: {grid_path}")
+        
 
-    # 4. MODALITÀ B: PLOT SINGOLI 1D AD ALTA STATISTICA (Per tutte le combinazioni reali)
+    # 5. MODALITÀ B: PLOT SINGOLI 1D AD ALTA STATISTICA (Per tutte le combinazioni reali)
     if save_individual_plots:
         print("--> Generazione dei plot 1D singoli per ogni contesto...")
-        # Iteriamo su TUTTI i contesti possibili per non perdere dettagli nel report finale
-        for s_ctx in unique_sim_ctx:
-            for d_ctx in unique_data_ctx:
-                mask = (sim_co_rounded == s_ctx).all(axis=1) & (
-                    data_co_rounded == d_ctx
-                ).all(axis=1)
+        for s_ctx in all_unique_sim:
+            for d_ctx in all_unique_data:
+                # Applichiamo la tolleranza stretta anche qui per coerenza millimetrica
+                mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-5).all(axis=1)
+                mask_data = np.isclose(data_co_rounded, d_ctx, atol=1e-5).all(axis=1)
+                mask = mask_sim & mask_data
 
-                # Se questa combinazione non ha cluster nel dataset, saltiamo
+                # Se questa combinazione non ha cluster nel dataset attuale, saltiamo
                 if not mask.any():
                     continue
 
-                # Generiamo un file separato per ciascuna variabile di questa combinazione
+                # Generiamo un file separato per ciascuna variabile di questa combinazione pura
                 for var_idx, var_name in enumerate(whitelist):
                     s_vals = sim_sc[mask, var_idx]
                     p_vals = pred_sc[mask, var_idx]
@@ -1249,7 +1231,7 @@ def run_sampled_and_detailed_test(
                         s_vals,
                         bins=bins,
                         alpha=0.4,
-                        label=f"SIM {list(s_ctx)}",
+                        label=f"SIM {list(np.round(s_ctx,2))}",
                         color="tab:blue",
                         density=True,
                     )
@@ -1266,13 +1248,12 @@ def run_sampled_and_detailed_test(
                         d_vals,
                         bins=bins,
                         alpha=0.2,
-                        label=f"DATA {list(d_ctx)}",
+                        label=f"DATA {list(np.round(d_ctx,2))}",
                         color="tab:green",
                         hatch="//",
                         density=True,
                     )
 
-                    # Formattiamo i nomi dei file per evitare caratteri strani o spazi
                     s_str = "_".join([str(x) for x in s_ctx])
                     d_str = "_".join([str(x) for x in d_ctx])
 
@@ -1291,4 +1272,3 @@ def run_sampled_and_detailed_test(
                     )
                     plt.savefig(indiv_path, dpi=150, bbox_inches="tight")
                     plt.close()
-                    

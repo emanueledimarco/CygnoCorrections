@@ -12,11 +12,13 @@ class ConditionalClusterDataset(Dataset):
         pkl_file,
         n_clusters=32,
         min_clusters_per_condition=10,
-        transform=None
+        transform=None,
+        is_test=False
     ):
 
         self.n_clusters = n_clusters
         self.transform = transform
+        self.is_test = is_test
 
         # ---------------------------------
         # load cache
@@ -66,10 +68,26 @@ class ConditionalClusterDataset(Dataset):
                 "No shared z values between sim and data."
             )
 
+        # ---------------------------------
+        # COSTRUIAMO UNA LISTA DETERMINISTICA DI COPPIE (SIM, DATA)
+        # ---------------------------------
+        self.all_combinations = []
+        for z in self.shared_z:
+            for s_k in self.sim_keys_by_z[z]:
+                for d_k in self.data_keys_by_z[z]:
+                    self.all_combinations.append({
+                        "z": z,
+                        "sim_key": s_k,
+                        "data_key": d_k
+                    })
+        
         # pseudo-length
         self.dataset_length = 100000
 
     def __len__(self):
+        # Se siamo in test, la lunghezza corrisponde esattamente al numero di combinazioni reali!
+        if self.is_test:
+            return len(self.all_combinations)
         return self.dataset_length
 
 
@@ -136,43 +154,40 @@ class ConditionalClusterDataset(Dataset):
 
 
     def __getitem__(self, idx):
-
-        # ---------------------------------
-        # choose shared z
-        # ---------------------------------
-        z = random.choice(self.shared_z)
-
-        # ---------------------------------
-        # choose sim condition
-        # ---------------------------------
-        sim_key = random.choice(
-            self.sim_keys_by_z[z]
-        )
-
-        sim_clusters = self.sample_clusters(
-            self.sim_dict[sim_key]
-        )
-
-        # ---------------------------------
-        # choose data condition
-        # ---------------------------------
-        data_key = random.choice(
-            self.data_keys_by_z[z]
-        )
-
-        data_clusters = self.sample_clusters(
-            self.data_dict[data_key]
-        )
+        if self.is_test:
+            # --- MODALITÀ TEST: Determinismo assoluto delle chiavi ---
+            combo = self.all_combinations[idx]
+            z = combo["z"]
+            sim_key = combo["sim_key"]
+            data_key = combo["data_key"]
+            
+            # Fissiamo un seed locale basato sull'indice per rendere riproducibile l'estrazione dei 32 cluster
+            rng = np.random.RandomState(idx)
+            
+            sim_cluster_list = self.sim_dict[sim_key]
+            sim_replace = len(sim_cluster_list) < self.n_clusters
+            sim_idx = rng.choice(len(sim_cluster_list), self.n_clusters, replace=sim_replace)
+            sim_clusters = [sim_cluster_list[i] for i in sim_idx]
+            
+            data_cluster_list = self.data_dict[data_key]
+            data_replace = len(data_cluster_list) < self.n_clusters
+            data_idx = rng.choice(len(data_cluster_list), self.n_clusters, replace=data_replace)
+            data_clusters = [data_cluster_list[i] for i in data_idx]
+            
+        else:
+            # --- MODALITÀ TRAINING: Stocastico standard ---
+            rng_train = np.random.RandomState(idx)
+            z = rng_train.choice(self.shared_z)
+            sim_key = rng_train.choice(self.sim_keys_by_z[z])
+            data_key = rng_train.choice(self.data_keys_by_z[z])
+            
+            sim_clusters = self.sample_clusters(self.sim_dict[sim_key])
+            data_clusters = self.sample_clusters(self.data_dict[data_key])
 
         return {
-
-        "z": z,
-
-        "sim_cond": sim_key,
-        "data_cond": data_key,
-
-        "sim_clusters": sim_clusters,
-        "data_clusters": data_clusters,
-
+            "z": z,
+            "sim_cond": sim_key,
+            "data_cond": data_key,
+            "sim_clusters": sim_clusters,
+            "data_clusters": data_clusters,
         }
-    

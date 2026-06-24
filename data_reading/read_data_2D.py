@@ -55,24 +55,42 @@ def read_data_and_save(conf):
     
     sim_map  = dictionary["data_inputs"]["sim_map"]
     data_map = dictionary["data_inputs"]["data_map"]
-    
-    maps = dict(zip(["sim","data"],[sim_map,data_map]))
-    for k,m in maps.items():
+
+    maps = dict(zip(["sim", "data"], [sim_map, data_map]))
+    for k, m in maps.items():
         with open(m) as f:
             raw_map_dic = yaml.safe_load(f)
-            map_dic = {tuple(map(float, k.split(","))): v for k, v in raw_map_dic.items()}
-            #print(map_dic)
-            if k=="sim":
+            
+            # Costruiamo il dizionario controllando le collisioni latenti
+            map_dic = {}
+            for raw_k, v in raw_map_dic.items():
+                # Arrotondiamo esplicitamente a 4 decimali per evitare cluster float nativi sporchi
+                str_vals = raw_k.split(",")
+                mapkey = tuple(round(float(x), 4) for x in str_vals)
+                
+                if mapkey in map_dic:
+                    print(f"\n[ATTENZIONE CRITICA] Collisione rilevata per la chiave {mapkey}!")
+                    print(f"  -> Stringa YAML precedente associata a: {map_dic[mapkey]}")
+                    print(f"  -> Stringa YAML corrente sovrapposta: {v}")
+                    # Uniamo le liste o lanciamo un errore a seconda della fisica che ti aspetti:
+                    map_dic[mapkey].extend(v) 
+                else:
+                    map_dic[mapkey] = v
+
+            if k == "sim":
                 print("\t==> Simulation now...")
-                for mapkey,files in map_dic.items():
-                    sim_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=False, selection_cfg=selection_cfg)
-                    #break
+                for mapkey, files in map_dic.items():
+                    print(f"mapkey for SIM = {mapkey} | Numero file associati: {len(files)}")
+                    sim_clusters_dict[mapkey] = build_dataset_from_files(
+                        files, all_cluster_variables, mapkey, isdata=False, selection_cfg=selection_cfg
+                    )
             else:
                 print("\t==> Data now...")
-                for mapkey,files in map_dic.items():
-                    data_clusters_dict[mapkey] = build_dataset_from_files(files, all_cluster_variables, mapkey, isdata=True, selection_cfg=selection_cfg)
-                    #break
-
+                for mapkey, files in map_dic.items():
+                    data_clusters_dict[mapkey] = build_dataset_from_files(
+                        files, all_cluster_variables, mapkey, isdata=True, selection_cfg=selection_cfg
+                    )
+    
     # save some metadata information
     metadata = {
         "version": conf,
@@ -304,6 +322,21 @@ def image_test(sample):
     ax[1].set_title("DATA")
     
     plt.show()
+
+def dataset_sanity(inputfile):
+        print(f"Reading source_data and target_data from pre-selected cluster datasets in {inputfile}")
+
+        dataset = ConditionalClusterDataset(
+            pkl_file=inputfile,
+            n_clusters=32
+        )
+
+        debug_clusters_dataset(
+            sim_dataset_dict=dataset.sim_dict,
+            whitelist_scalars=["integral"],
+            output_dir="plot/debug_fase_1",
+        )
+        
     
 def integrity_tests(inputfile):
         print(f"Reading source_data and target_data from pre-selected cluster datasets in {inputfile}")
@@ -344,3 +377,81 @@ def integrity_tests(inputfile):
         print("\n\n\t ***** IMAGE CLUSTER TEST *****")
         image_test(sample)
         
+
+def debug_clusters_dataset(sim_dataset_dict, whitelist_scalars=["integral"], output_dir="debug_plots"):
+    """Esegue un sanity check immediato sui cluster appena estratti in memoria.
+
+    Accetta un dizionario dove la chiave identifica il contesto (es. la stringa
+    o la tupla della condizione) e il valore è la lista di oggetti Cluster.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    print("\n=== [DEBUG] ISPEZIONE DATASET DI SIMULAZIONE IN MEMORIA ===")
+
+    for ctx_key, cluster_list in sim_dataset_dict.items():
+        num_clusters = len(cluster_list)
+        print(
+            f"Chiave Contesto: {ctx_key} | Numero Cluster Estratti: {num_clusters}"
+        )
+
+        if num_clusters == 0:
+            print(f"  --> ATTENZIONE: Nessun cluster per la chiave {ctx_key}")
+            continue
+
+        # Estraiamo gli scalari richiesti ciclando sugli oggetti Cluster
+        for var_name in whitelist_scalars:
+            try:
+                # Recuperiamo l'attributo dinamico (es. cluster.integral)
+                vals = [getattr(c, var_name) for c in cluster_list]
+                vals = np.array(vals)
+
+                # Calcoliamo metriche di controllo rapide
+                v_min, v_max = vals.min(), vals.max()
+                v_mean, v_std = vals.mean(), vals.std()
+                print(
+                    f"  -> Var '{var_name}': Media={v_mean:.2f} ± {v_std:.2f} | Range=[{v_min:.2f}, {v_max:.2f}]"
+                )
+
+                # Generiamo un plot 1D isolato per questa chiave
+                plt.figure(figsize=(6, 4))
+                bins = np.linspace(v_min, v_max, 40) if v_min != v_max else 10
+
+                plt.hist(
+                    vals,
+                    bins=bins,
+                    color="tab:blue",
+                    alpha=0.7,
+                    edgecolor="black",
+                    density=True,
+                )
+
+                # Pulizia del nome del file dalle parentesi o caratteri speciali delle chiavi
+                clean_filename = (
+                    str(ctx_key)
+                    .replace("(", "")
+                    .replace(")", "")
+                    .replace(" ", "")
+                    .replace(",", "_")
+                )
+
+                plt.title(
+                    f"DEBUG INGRESSO: {var_name}\nContesto: {ctx_key}\nCluster Totali: {num_clusters}",
+                    fontsize=10,
+                    fontweight="bold",
+                )
+                plt.xlabel(var_name)
+                plt.ylabel("Densità")
+                plt.grid(True, linestyle="--", alpha=0.5)
+
+                plot_path = os.path.join(
+                    output_dir, f"debug_{var_name}_{clean_filename}.png"
+                )
+                plt.savefig(plot_path, dpi=120, bbox_inches="tight")
+                plt.close()
+                print(f"  --> Grafico salvato in: {plot_path}")
+
+            except AttributeError:
+                print(
+                    f"  --> ERRORE: Lo scalare '{var_name}' non esiste nell'oggetto Cluster."
+                )
+
+    print("===========================================================\n")

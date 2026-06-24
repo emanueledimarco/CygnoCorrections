@@ -98,15 +98,22 @@ def build_clusters_from_event(
         # ------------------------
         scalars = {}
         for var in scalar_vars:
-            val = arrays[var][iev][isc]
+            # Estraiamo l'intero dato dell'evento corrente
+            evt_data = arrays[var][iev]
 
-            if isinstance(val, (list, np.ndarray)) or hasattr(val, "__len__"):
-                scalars[var] = val[isc]
+            # Controlliamo se è un array/lista con un elemento per ogni supercluster
+            if isinstance(evt_data, (list, np.ndarray)) and len(evt_data) == nSc:
+                # Prendiamo lo scalare corrispondente esattamente a QUESTO cluster
+                scalars[var] = float(evt_data[isc])
+            elif isinstance(evt_data, (list, np.ndarray)) and len(evt_data) > isc:
+                # Caso di fallback se l'array ha lunghezze asimmetriche
+                scalars[var] = float(evt_data[isc])
             else:
-                scalars[var] = val
+                # Se è un valore singolo per tutto l'evento (es. variabili globali)
+                scalars[var] = float(evt_data)
 
         scalars["npix"] = len(pix)
-
+        
         # ------------------------
         # condition
         # ------------------------
@@ -164,7 +171,7 @@ def build_clusters_from_root_file(
     selection_cfg=None
 ):
 
-    print (f"Will open the rootfile {root_file}")
+    #print (f"Will open the rootfile {root_file}")
     f = uproot.open(root_file)
     tree = f["Events"]
 

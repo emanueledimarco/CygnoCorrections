@@ -17,6 +17,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--onlycache",action="store_true",help="Run only the creation of the panda dataframes and cache them")
     parser.add_argument("--configuration",type=str,default="configuration_limerun4_v2",help="Key of the configuration in the flow yaml configuration file")
+    parser.add_argument("--dscheck",action="store_true",help="do a sanity check of the conditioned dataset")   
     parser.add_argument("--integrity",action="store_true",help="use cached clusters dataset, and do integrity tests")
     parser.add_argument("--fwdtest",action="store_true",help="do the fwd test of the CYGNO transport model")
     parser.add_argument("--train",action="store_true",help="train the correction")
@@ -35,6 +36,9 @@ if __name__ == "__main__":
     if args.integrity:
         integrity_tests(inputfile)
 
+    if args.dscheck:
+        dataset_sanity(inputfile)
+        
     if args.fwdtest:
         forward_test(inputfile)
 
