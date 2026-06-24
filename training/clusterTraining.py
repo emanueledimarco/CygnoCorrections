@@ -556,15 +556,15 @@ def compute_cygno_loss(
     loss = (
         1.0 * L_mmd
         +
-        0.1 * L_integral  # Abbassato a 0.1 per dare spazio alle forme 2D
+        1.0 * L_integral  # Abbassato a 0.1 per dare spazio alle forme 2D
         +
         1.0 * L_width     # Lasciato a 1.0 per forzare la diffusione trasversa
         +
         0.0 * L_transport
         +
-        0.2 * L_tv       
+        0.01 * L_tv       
         +
-        0.2 * L_lap      
+        0.01 * L_lap      
         +
         2.0 * L_identity
     )
@@ -1149,19 +1149,19 @@ def run_sampled_and_detailed_test(
 
         for idx_coppia, coppia in enumerate(coppie_selezionate):
             ax = axes_flat[idx_coppia]
-            
+
             s_ctx = coppia[:3]
             d_ctx = coppia[3:]  # Contiene [z, P, T, H]
 
+            # Maschere totalmente indipendenti sui vettori globali accumulati
             mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-5).all(axis=1)
             mask_data = np.isclose(data_co_rounded, d_ctx, atol=1e-5).all(axis=1)
-            mask = mask_sim & mask_data
 
-            # Ora sim_sc è rigidamente 2D, l'indicizzazione a due coordinate è sicura e corretta
-            s_vals = sim_sc[mask, idx_var]
-            p_vals = pred_sc[mask, idx_var]
-            d_vals = data_sc[mask, idx_var]
-
+            # Estrazione dei valori senza fare l'intersezione logica &
+            s_vals = sim_sc[mask_sim, idx_var]   # Tutta la statistica SIM accumulata per questa chiave
+            p_vals = pred_sc[mask_sim, idx_var]  # Tutta la statistica PRED accumulata per questa chiave
+            d_vals = data_sc[mask_data, idx_var] # Tutta la statistica DATA accumulata per questa chiave
+            
             # Se la maschera non seleziona eventi per questa combinazione, saltiamo il plot
             if len(s_vals) == 0 or len(d_vals) == 0:
                 ax.text(0.5, 0.5, "No Data", transform=ax.transAxes, ha="center")
