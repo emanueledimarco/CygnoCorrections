@@ -208,46 +208,100 @@ class DifferentialTransport(nn.Module):
 
         return delta_h
 
+def compute_physical_scalars_from_image(images, eps=1e-4):
+    """
+    Versione ultra-blindata che appiatisce preventivamente qualsiasi 
+    struttura di batch/canale complessa in un unico asse di cluster distinti.
+    """
+    device = images.device
+    
+    # Se ci passano [B, N, H, W] o [N, C, H, W], collassiamo tutto ciò che sta prima di (H, W)
+    H, W = images.shape[-2], images.shape[-1]
+    imgs = images.view(-1, H, W) # Diventa rigidamente [Tot_Clusters, 64, 64]
+    L_batch = imgs.shape[0]      # Il vero numero di cluster totali da elaborare
+    
+    # Griglia di coordinate centrate (valori da -32 a 31)
+    y_indices, x_indices = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=device) - H // 2,
+        torch.arange(W, dtype=torch.float32, device=device) - W // 2,
+        indexing="ij"
+    )
+    
+    x_coords = x_indices.unsqueeze(0) # [1, H, W]
+    y_coords = y_indices.unsqueeze(0) # [1, H, W]
+    
+    imgs = torch.clamp(imgs, min=0.0)
+    
+    # --- A. INTEGRALE ---
+    integrals = torch.sum(imgs, dim=[1, 2]) # [L_batch]
+    integrals_safe = torch.where(integrals > eps, integrals, torch.tensor(eps, device=device))
+    
+    # --- B. CENTROIDI ---
+    x_c = torch.sum(imgs * x_coords, dim=[1, 2]) / integrals_safe # [L_batch]
+    y_c = torch.sum(imgs * y_coords, dim=[1, 2]) / integrals_safe # [L_batch]
+    
+    x_c_grid = x_c.view(L_batch, 1, 1)
+    y_c_grid = y_c.view(L_batch, 1, 1)
+
+    x_centered = x_coords - x_c_grid
+    y_centered = y_coords - y_c_grid
+    
+    # --- C. MOMENTI SECONDI ---
+    mu_xx = torch.sum(imgs * (x_centered ** 2), dim=[1, 2]) / integrals_safe
+    mu_yy = torch.sum(imgs * (y_centered ** 2), dim=[1, 2]) / integrals_safe
+    mu_xy = torch.sum(imgs * (x_centered * y_centered), dim=[1, 2]) / integrals_safe
+    
+    # --- D. AUTOVALORI PROTETTI ---
+    trace = mu_xx + mu_yy
+    det = mu_xx * mu_yy - (mu_xy ** 2)
+    
+    discriminant_arg = torch.clamp(trace**2 - 4 * det, min=0.0)
+    discriminant = torch.sqrt(discriminant_arg + eps)
+    
+    lambda_max = (trace + discriminant) / 2.0
+    lambda_min = (trace - discriminant) / 2.0
+    
+    lengths = 2.0 * torch.sqrt(torch.clamp(lambda_max, min=0.0) + eps)
+    widths = 2.0 * torch.sqrt(torch.clamp(lambda_min, min=0.0) + eps)
+    
+    # Restituisce [L_batch, 3]
+    return torch.stack([integrals, lengths, widths], dim=1)
 
 class CygnoTransportModel(nn.Module):
 
-    def __init__(self, latent_dim=128, cond_dim=64, num_scalars=4):
+    def __init__(self, latent_dim=128, cond_dim=64):
         super().__init__()
 
         self.encoder = ClusterEncoder(latent_dim)
         self.cond_encoder = ConditionEncoder()
         
         # Passiamo implicitamente cond_dim=64 (il default del ConditionEncoder)
-        self.transport = DifferentialTransport(latent_dim, cond_dim=64)
+        self.transport = DifferentialTransport(latent_dim, cond_dim=cond_dim)
         self.decoder = ClusterDecoder(latent_dim)
 
-        # per correggere gli scalari basandosi sul contesto ambientale
-        # (cond_dim * 2 perché concateniamo l'embedding di SIM e DATA)
-        self.scalar_transport = nn.Sequential(
-            nn.Linear(cond_dim * 2, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_scalars)
-        )
-        
-
     def forward(self, sim_img, sim_cond, data_cond, sim_scalars):
-        # 1. Immagini e Spazio latente
+        """
+        Esegue il trasporto condizionale nello spazio latente geometrico.
+        L'argomento sim_scalars viene mantenuto nella firma per retro-compatibilità 
+        con le chiamate esterne (se necessario alla rete latente), ma il calcolo degli scalari 
+        predetti viene rimosso poiché ora delegato alla funzione di calcolo dai pixel nella loss.
+        """
+        # 1. Encoding dell'immagine di simulazione nello spazio latente h
         h = self.encoder(sim_img)
+        
+        # 2. Estrazione degli embedding di contesto (SIM e DATA)
         e_sim, e_data = self.cond_encoder(sim_cond, data_cond)
         cond_totale = torch.cat([e_sim, e_data], dim=-1)
 
+        # 3. Trasporto differenziale condizionale nello spazio latente
         delta_h = self.transport(h, cond_totale)
         h_corr = h + delta_h
+        
+        # 4. Decoding dell'immagine trasportata finale (PRED)
         pred_img = self.decoder(h_corr)
 
-        # 2. Correzione degli scalari pre-calcolati (Residual Transport)
-        # sim_scalars ha forma [B*N, num_scalars]
-        delta_scalars = self.scalar_transport(cond_totale)
-        pred_scalars = sim_scalars + delta_scalars
-
         return {
-            "pred": pred_img,
-            "pred_scalars": pred_scalars,
+            "pred_images": pred_img,  # Usiamo esplicitamente 'pred_images' per coerenza con train_epoch e il test loop
             "latent": h,
             "delta_h": delta_h
         }
@@ -306,7 +360,7 @@ def forward_test(inputfile):
     )
 
     print(
-        out["pred"].shape
+        out["pred_images"].shape
     )
 
     print(
@@ -434,122 +488,83 @@ def extract_profiles(x):
 
 
 # === COMPLETE LOSS FUNCTION ===
-# A) distribution matching
-# B) physics loss
-# C) scalar auxiliary loss
-# D) latent regularization
 def compute_cygno_loss(
-    pred,
-    data,
-    pred_scalars,
-    target_scalars,
-    delta_h,
-    pred_identity=None,
-    sim_images=None
+    pred,               # Immagine 2D generata dal Flow: [N, 1, 64, 64]
+    data,               # Immagine 2D target reale: [N, 1, 64, 64]
+    pred_scalars,       # Vettore [N, 3] di [integral, length, width] da pred_images
+    target_scalars,     # Vettore [N, 3] di [integral, length, width] da data_images
+    delta_h,            # Vettore di spostamento latente del Flow
+    pred_identity=None, # Immagine 2D dell'identità: [N, 1, 64, 64]
+    sim_images=None     # Immagine 2D di partenza SIM: [N, 1, 64, 64]
 ):
+    # Noise Clamping sui dati reali sCMOS
+    data_clamped = torch.clamp(data, min=0.0)
 
-    # Pulizia dei dati reali dai pixel negativi (Noise Clamping)
-    # ma i dati reali hanno fluttuazioni negative del piedistallo.
-    data = torch.clamp(data, min=0.0)
-
-    # CLAMPING E CONSISTENZA FISICA DEI PIXEL ---
-    # Garantiamo che tutte le intensità predette siano strettamente >= 0
+    # Garantiamo che tutte le intensità predette siano strettamente >= 0 (Consistenza di carica)
     pred_clamped = F.elu(pred) + 1.0
 
     # ------------------------------------------------------------
-    # Indentity loss (Autoencoder)
+    # 1. Identity Loss (Autoencoder di stabilità per il trasporto)
     # ------------------------------------------------------------
     L_identity = 0.0
     if pred_identity is not None and sim_images is not None:
-        # Applichiamo il softplus anche qui per consistenza con l'output intensità
-        pred_id_clamped = F.elu(pred_identity) + 1
-        # Semplice MSE a livello di pixel tra l'input SIM e la sua ricostruzione
+        pred_id_clamped = F.elu(pred_identity) + 1.0
         L_identity = F.mse_loss(pred_id_clamped, sim_images)
 
-    
-    # Normalizzazione a densità probabilistica spaziale (Somma = 1 per ogni singolo cluster)
+    # ------------------------------------------------------------
+    # 2. MMD Loss sulle forme geometriche proiettate (Profili X e Y)
+    # ------------------------------------------------------------
+    # Normalizzazione a densità probabilistica spaziale (Somma dei pixel = 1)
     pred_n = pred_clamped / (pred_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
-    data_n = data / (data.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    data_n = data_clamped / (data_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
 
-    # print("SHAPE CHECK:")
-    # print("pred_n shape:", pred_n.shape)  # Deve essere [B*N, 1, 64, 64] o [B, N, 64, 64]
-    # print("data_n shape:", data_n.shape)  # Deve essere identica a pred_n
-    # print("RANGE CHECK (Primo elemento del batch):")
-    # print(f"PRED_N -> Min: {pred_n[0].min().item():.4f} | Max: {pred_n[0].max().item():.4f} | Sum: {pred_n[0].sum().item():.4f}")
-    # print(f"DATA_N -> Min: {data_n[0].min().item():.4f} | Max: {data_n[0].max().item():.4f} | Sum: {data_n[0].sum().item():.4f}")
-
-    # Estraiamo i profili proiettati (Shape finale: [B*N, 128])
     pred_n_feat = extract_profiles(pred_n)
     data_n_feat = extract_profiles(data_n)
-
-    # Calcoliamo la loss sulle forme geometriche dei profili
     L_mmd = compute_mmd_rbf(pred_n_feat, data_n_feat)
+
+    # ------------------------------------------------------------
+    # 3. Supervisione Diretta delle Proprietà Fisiche (Stabilizzata in Log)
+    # ------------------------------------------------------------
+    # pred_scalars e target_scalars: [N, 3] -> [Integrale, Length, Width]
+    # Usiamo il logaritmo per schiacciare la scala dinamica sCMOS da lineare a logaritmica
+    log_pred_integral = torch.log(pred_scalars[:, 0] + 1e-3)
+    log_target_integral = torch.log(target_scalars[:, 0] + 1e-3)
     
-    # --------------------------------
-    # physics constraints
-    # --------------------------------
-    pred_integral = pred_clamped.sum(dim=(-1, -2))
-    data_integral = data.sum(dim=(-1, -2))
-    L_integral = (pred_integral - data_integral).pow(2).mean()
+    # Loss sull'integrale in scala logaritmica (MSE del log o Smooth L1)
+    L_integral = F.smooth_l1_loss(log_pred_integral, log_target_integral)
 
-    # normalize to the number of elements
-    L_integral = L_integral / pred_clamped.numel()
+    # Anche per la width (diffusione), usiamo un errore relativo robusto (L1) invece dell'MSE quadratico
+    # per evitare che un cluster largo sballi l'intero batch
+    L_width = F.l1_loss(pred_scalars[:, 2] / (target_scalars[:, 2] + 1e-3), 
+                        target_scalars[:, 2] / (target_scalars[:, 2] + 1e-3))
 
-    pred_rms = torch.sqrt((pred_clamped ** 2).mean(dim=(-1,-2)))
-    data_rms = torch.sqrt((data ** 2).mean(dim=(-1,-2)))
-    L_rms = (pred_rms - data_rms).pow(2).mean()
-
-    # --------------------------------
-    # auxiliary scalar supervision
-    # --------------------------------
-    # Calcoliamo medie e deviazioni standard lungo il batch (dim=0)
-    mean_pred = pred_scalars.mean(dim=0)
-    mean_tgt  = target_scalars.mean(dim=0)
-    
-    std_pred  = pred_scalars.std(dim=0)
-    std_tgt   = target_scalars.std(dim=0)
-
-    # Normalizziamo l'MSE dividendo per il target reale (più epsilon anti-zero).
-    # In questo modo un errore di 1000 su un target di 20000 peserà solo (1000/20000)^2 = 0.0025,
-    # neutralizzando l'esplosione dei gradienti dovuta all'unità di misura sCMOS.
-    L_scalars_mean = F.mse_loss(
-        mean_pred / (mean_tgt + 1e-5), 
-        mean_tgt / (mean_tgt + 1e-5)
-    )
-    L_scalars_std = F.mse_loss(
-        std_pred / (std_tgt + 1e-5), 
-        std_tgt / (std_tgt + 1e-5)
-    )
-    L_aux = L_scalars_mean + L_scalars_std
+    L_aux = L_integral + L_width
         
-    # --------------------------------
-    # latent near-identity
-    # --------------------------------
+    # ------------------------------------------------------------
+    # 4. Regolarizzazione Latente e Regolarizzazione Spaziale Pixel
+    # ------------------------------------------------------------
     L_transport = (delta_h.pow(2)).mean()
     
-    # ------------------------------------------------------------
-    # total variation loss and smoothness (to reduce pixels jumps)
-    # ------------------------------------------------------------
+    # TV e Laplace per levigare la scacchiera artificiale
     L_tv = total_variation(pred_clamped)
     L_lap = laplacian_smoothness(pred_clamped)
 
-    # --------------------------------
-    # final weighted loss
-    # --------------------------------
+    # ------------------------------------------------------------
+    # 5. Combinazione Pesata Finale con Nuovi Bilanciamenti
+    # ------------------------------------------------------------
+    # Scaliamo L_integral per evitare che cannibalizzi i gradienti
     loss = (
         1.0 * L_mmd
         +
-        0.1 * L_integral
+        0.1 * L_integral  # Abbassato a 0.1 per dare spazio alle forme 2D
         +
-        0.1 * L_rms
-        +
-        0.001 * L_aux
+        1.0 * L_width     # Lasciato a 1.0 per forzare la diffusione trasversa
         +
         0.0 * L_transport
         +
-        0.1 * L_tv
+        0.2 * L_tv       
         +
-        0.1 * L_lap
+        0.2 * L_lap      
         +
         2.0 * L_identity
     )
@@ -558,22 +573,20 @@ def compute_cygno_loss(
         "total": loss.item(),
         "mmd": L_mmd.item(),
         "integral": L_integral.item(),
-        "rms": L_rms.item(),
+        "rms": L_width.item(), # mappiamo la width nella vecchia voce RMS per non rompere i log dell'epoca
         "aux": L_aux.item(),
         "transport": L_transport.item(),
         "totvar": L_tv.item(),
-        "laplace": L_tv.item(),
+        "laplace": L_lap.item(),
         "identity": L_identity.item() if isinstance(L_identity, torch.Tensor) else 0.0
     }
 
     return loss, loss_dict
 
 
-
 # === TRAINING EPOCH ===
 import numpy as np
 import torch
-
 
 def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
 
@@ -602,23 +615,30 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
         if ibatch % 10 == 0:
             print(f"\t\t  running ibatch {ibatch}...")
 
+        # Caricamento delle immagini e condizioni [B, N, H, W]
         sim_images = batch["sim_images"].to(device)
         data_images = batch["data_images"].to(device)
-
         sim_cond = batch["sim_cond"].to(device)
         data_cond = batch["data_cond"].to(device)
 
-        sim_scalars_raw = batch["sim_scalars"].to(device)
-        data_scalars_raw = batch["data_scalars"].to(device)
-
         B, N, H, W = sim_images.shape
-        num_scal = sim_scalars_raw.shape[-1]
 
-        # Inizializziamo gli accumulatori per sommare le loss e le metriche di questo macro-batch
+        # 1. RICALCOLO MASSIVO DEGLI SCALARI DI PARTENZA E TARGET IN DIRETTA DALLE IMMAGINI
+        # Appiattiamo temporaneamente in [B*N, 1, H, W] per far lavorare la funzione in parallelo
+        sim_images_flat = sim_images.view(B * N, 1, H, W)
+        data_images_flat = data_images.view(B * N, 1, H, W)
+
+        sim_scalars_phys_flat = compute_physical_scalars_from_image(sim_images_flat)
+        data_scalars_phys_flat = compute_physical_scalars_from_image(data_images_flat)
+
+        # Ripristiniamo la shape originale ad eventi: [B, N, num_scal] dove num_scal = 3
+        sim_scalars_phys = sim_scalars_phys_flat.view(B, N, -1)
+        data_scalars_phys = data_scalars_phys_flat.view(B, N, -1)
+
+        # Inizializziamo gli accumulatori per questo macro-batch
         loss_batch_accumulata = 0.0
         delta_h_norm_accumulata = 0.0
 
-        # Struttura di appoggio per fare la media dei dizionari 'info' dell'evento
         info_batch_accumulato = {
             "total": 0.0,
             "mmd": 0.0,
@@ -631,91 +651,58 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
             "identity": 0.0,
         }
 
-        # Resettiamo i gradienti una volta sola all'inizio del macro-batch
         optimizer.zero_grad()
 
         # ============================================================
         # LOOP ISOLATO SUL SINGOLO EVENTO/CONTESTO REALISTICO (b)
         # ============================================================
         for b in range(B):
-            # 1. Isolamento dei 32 cluster dell'evento coerente b
-            s_img = sim_images[b].unsqueeze(1)  # Shape: [N, 1, H, W]
-            d_img = data_images[b].unsqueeze(1)  # Shape: [N, 1, H, W]
+            # Isolamento dei N cluster del singolo evento b
+            s_img = sim_images[b].unsqueeze(1)   # [N, 1, H, W]
+            d_img = data_images[b].unsqueeze(1)   # [N, 1, H, W]
 
-            # 2. Espansione locale dei contesti
-            s_cond = sim_cond[b].unsqueeze(0).repeat(N, 1)  # Shape: [N, cond_dim]
-            d_cond = data_cond[b].unsqueeze(0).repeat(N, 1)  # Shape: [N, cond_dim]
+            # Espansione locale dei contesti
+            s_cond = sim_cond[b].unsqueeze(0).repeat(N, 1)  # [N, cond_dim_sim]
+            d_cond = data_cond[b].unsqueeze(0).repeat(N, 1)  # [N, cond_dim_data]
 
-            # 3. Scalari dell'evento
-            s_scal = sim_scalars_raw[b]  # Shape: [N, num_scal]
-            d_scal = data_scalars_raw[b]  # Shape: [N, num_scal]
+            # Scalari dell'evento estratti dai vettori differenziabili ricalcolati
+            s_scal = sim_scalars_phys[b]  # [N, 3] -> [integral, length, width]
+            d_scal = data_scalars_phys[b]  # [N, 3] -> [integral, length, width]
 
-            # 4. Forward mirato del Trasporto Condizionale
+            # Forward del modello (Passiamo gli scalari fisici di partenza coerenti)
             out = model(s_img, s_cond, d_cond, s_scal)
+            pred_img = out["pred_images"]  # Immagine prodotta dal Flow [N, 1, H, W]
 
-            pred_flat = out["pred"]
-            pred_scalars_raw = out["pred_scalars"]
-            # Clamping fisico di sicurezza per le variabili strettamente positive (es. Scalare [1])
-            pred_scalars = torch.clamp(pred_scalars_raw, min=0.0)
+            # 2. CALCOLO IN DIRETTA DEGLI SCALARI DELLA PREDIZIONE (L'unico vero legame differenziabile)
+            pred_scalars_phys = compute_physical_scalars_from_image(pred_img) # [N, 3]
 
-            # ------------------------------------------------------------
-            # SANITY CHECK DELLE VARIABILI SCALARI
-            # ------------------------------------------------------------
-            # with torch.no_grad():
-            #     print("\n=== SCALARS SANITY CHECK ===")
-            #     print(f"SIM cond = \n {sim_cond}") 
-            #     print(f"DATA cond = \n {data_cond}") 
-            #     # Cicliamo sulle 4 proprietà fisiche del cluster
-            #     for idx in range(pred_scalars.shape[-1]):
-            #         s_mean = s_scal[:, idx].mean().item()
-            #         s_std  = s_scal[:, idx].std().item()                
-            #         p_mean = pred_scalars[:, idx].mean().item()
-            #         p_std  = pred_scalars[:, idx].std().item()
-            #         t_mean = d_scal[:, idx].mean().item()
-            #         t_std  = d_scal[:, idx].std().item()
-                
-            #         print(f"Scalare [{idx}]:")
-            #         print(f"  -> SIMULATION : Media = {s_mean:12.4f} | Std = {s_std:12.4f}")
-            #         print(f"  -> PREDICTED : Media = {p_mean:12.4f} | Std = {p_std:12.4f}")
-            #         print(f"  -> EXPERIMENTAL: Media = {t_mean:12.4f} | Std = {t_std:12.4f}")
-            #     print("============================\n")
-
-            
-            # 5. Forward dell'identità (stesso contesto di partenza/arrivo per forzare delta_h = 0)
+            # Forward dell'identità per vincolare la stabilità del network
             out_identity = model(s_img, s_cond, s_cond, s_scal)
-            pred_identity = out_identity["pred"]
+            pred_identity_img = out_identity["pred_images"]
 
-            # 6. Calcolo della Loss isolata e protetta per la coppia b-esima
+            # 3. CHIAMATA A COMPUTE_CYGNO_LOSS CON VARIABILI 100% COERENTI
             loss_evento, info_evento = compute_cygno_loss(
-                pred=pred_flat,
-                data=d_img,
-                pred_scalars=pred_scalars,
-                target_scalars=d_scal,
+                pred=pred_img,                         # Ora passiamo direttamente il tensore 2D [N, 1, H, W]
+                data=d_img,                         # Tensore target 2D [N, 1, H, W]
+                pred_scalars=pred_scalars_phys,     # Scalari [N, 3] estratti geometricamente da pred
+                target_scalars=d_scal,              # Scalari [N, 3] estratti geometricamente da data
                 delta_h=out["delta_h"],
-                pred_identity=pred_identity,
+                pred_identity=pred_identity_img,     # Immagine dell'identità per la loss di consistenza
                 sim_images=s_img,
             )
 
-            # 7. Accumulo dei contributi pesati (dividiamo per B per fare la media aritmetica corretta)
             loss_batch_accumulata += loss_evento / B
             delta_h_norm_accumulata += out["delta_h"].norm().item() / B
 
             for k in info_batch_accumulato.keys():
                 info_batch_accumulato[k] += info_evento[k] / B
 
-        # ============================================================
-        # BACKWARD E OTTIMIZZAZIONE (Una sola volta per macro-batch)
-        # ============================================================
-        # loss_batch_accumulata contiene ora i gradienti mediati di entrambi gli eventi, perfettamente isolati
+        # Backward e ottimizzazione sul macro-batch unificato
         loss_batch_accumulata.backward()
-
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
         optimizer.step()
 
-        # ------------------------------------------------------------
-        # ACCUMULO STATISTICHE DELL'EPOCA
-        # ------------------------------------------------------------
+        # Accumulo statistiche
         epoch_stats["loss"].append(info_batch_accumulato["total"])
         epoch_stats["mmd"].append(info_batch_accumulato["mmd"])
         epoch_stats["integral"].append(info_batch_accumulato["integral"])
@@ -727,12 +714,9 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
         epoch_stats["identity"].append(info_batch_accumulato["identity"])
         epoch_stats["delta_h"].append(delta_h_norm_accumulata)
 
-    # ------------------------
-    # epoch average
-    # ------------------------
     epoch_stats = {k: np.mean(v) for k, v in epoch_stats.items()}
-
     return epoch_stats
+
 
 
 
@@ -752,14 +736,10 @@ def train_model(inputfile,outputfile,epochs=10):
 
     # to get the # of scalars
     sample_batch = next(iter(loader))
-    n_scalar_features = sample_batch["sim_scalars"].shape[-1] 
-    print(f"Found {n_scalar_features} scalars in the dataset. Initialize the model now...")
-    print(f"They correspond to the variables: {dataset.target_scalars}")
     
     model = (
         CygnoTransportModel(latent_dim=128, 
                             cond_dim=64, 
-                            num_scalars=n_scalar_features
                             ).to(device)
     )
 
@@ -843,6 +823,7 @@ def plot_training_history(train_history):
 def test_training(
     model_or_path,
     inputfile,
+    output_dir="plot/validation_plots",
     device=None):
 
     # -----------------------
@@ -895,10 +876,12 @@ def test_training(
 
     model.eval()
 
+    os.makedirs(output_dir, exist_ok=True)
+    
     # -----------------------
     # dataloader
     # -----------------------
-    dataset, loader = build_dataloader(inputfile, batch_size=10, is_test=True) # <--- Metti a 2!
+    dataset, loader = build_dataloader(inputfile, batch_size=10, is_test=True)
     batch = next(iter(loader))
 
     sim = batch["sim_images"].to(device)
@@ -924,12 +907,12 @@ def test_training(
         out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
 
     # 1. Ricostruisci la struttura a blocchi per le immagini
-    pred_clamped_flat = F.elu(out["pred"]) + 1.0
+    pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
     pred_images = pred_clamped_flat.view(B, N, H, W)
     
     # 2. Ricostruisci la struttura a blocchi per gli scalari
     # Da [B*N, num_scalars] a [B, N, num_scalars]
-    pred_scalars = out["pred_scalars"].view(B, N, -1)
+    pred_scalars = compute_physical_scalars_from_image(pred_images) # [N, 3]
     
     print("DEBUG TRA BATCH DIFFERENTI: ")
     # Confrontiamo l'evento 0 del batch 0 con l'evento 0 del batch 1
@@ -980,9 +963,9 @@ def test_training(
 
             # Forward
             out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
-            pred_clamped_flat = F.elu(out["pred"]) + 1.0
+            pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
             pred_images = pred_clamped_flat.view(B, N, H, W)
-            pred_scalars = torch.clamp(out["pred_scalars"], min=0.0).view(B, N, -1)
+            pred_scalars = torch.clamp(compute_physical_scalars_from_image(pred_images), min=0.0).view(B, N, -1)
             
             # Scegliamo il primo sotto-cluster (idx=0) di questo specifico batch
             test_sims.append(sim[0, 0].cpu())
@@ -1017,14 +1000,16 @@ def test_training(
         ax[i,2].set_title(f"DATA (Batch {i})") if i==0 else None
         
     plt.tight_layout()
-    plt.show()
+    cluster_test_path = os.path.join(output_dir, "clusters10_test.png")
+    plt.savefig(cluster_test_path, dpi=120, bbox_inches="tight")
+    plt.close()
+    print(f"\t--> Griglia con 10 clusters salvata con successo in: {cluster_test_path}")
 
-    run_sampled_and_detailed_test(model,loader,dataset.target_scalars,device,max_batches=50,output_dir="plot/validation_plots",save_individual_plots=False)
+    run_sampled_and_detailed_test(model,loader,device,max_batches=50,output_dir="plot/validation_plots",save_individual_plots=False)
 
 def run_sampled_and_detailed_test(
     model,
     test_loader,
-    whitelist,
     device,
     max_batches=50,
     num_sim_ctx_to_sample=3,
@@ -1033,7 +1018,7 @@ def run_sampled_and_detailed_test(
     output_dir="plots",
 ):
     import matplotlib.pyplot as plt
-    import os
+
     """Accumula i dati di test, esegue un campionamento deterministico/selezionato dei contesti per una
     griglia veloce (Csim x Cdata) priva di mixing e, se richiesto, salva grafici 1D separati ad
     alta statistica per ogni combinazione.
@@ -1056,16 +1041,21 @@ def run_sampled_and_detailed_test(
 
             sim_images = batch["sim_images"].to(device)
             data_images = batch["data_images"].to(device)
+            B, N, H, W = sim_images.shape
+            
+            sim_images_flat = sim_images.view(B * N, 1, H, W)
+            data_images_flat = data_images.view(B * N, 1, H, W)
+            
             sim_cond = batch["sim_cond"].to(device)
             data_cond = batch["data_cond"].to(device)
-            sim_scalars_raw = batch["sim_scalars"].to(device)
-            data_scalars_raw = batch["data_scalars"].to(device)
-
-            B, N, H, W = sim_images.shape
+            
+            # Escono come matrici 2D [B*N, 3]
+            sim_scalars_raw = compute_physical_scalars_from_image(sim_images_flat)
+            data_scalars_raw = compute_physical_scalars_from_image(data_images_flat)
 
             for b in range(B):
-                s_img = sim_images[b].unsqueeze(1)
-                d_img = data_images[b].unsqueeze(1)
+                s_img = sim_images[b].unsqueeze(1) # [N, 1, 64, 64]
+                d_img = data_images[b].unsqueeze(1) # [N, 1, 64, 64]
 
                 # Gestione shape cond senza passare da numpy
                 if len(sim_cond.shape) == 3:
@@ -1075,27 +1065,33 @@ def run_sampled_and_detailed_test(
                     s_c = sim_cond[b].unsqueeze(0).repeat(N, 1)
                     d_c = data_cond[b].unsqueeze(0).repeat(N, 1)
 
-                s_scal = sim_scalars_raw[b]
-                d_scal = data_scalars_raw[b]
+                # CORREZIONE CRITICA: Estraiamo la slice di N cluster per l'evento b mantenendo la shape 2D [N, 3]
+                s_scal = sim_scalars_raw[b * N : (b + 1) * N]
+                d_scal = data_scalars_raw[b * N : (b + 1) * N]
 
                 # Forward puramente su device
                 out = model(s_img, s_c, d_c, s_scal)
-                pred_scalars_clamped = torch.clamp(out["pred_scalars"], min=0.0)
+                pred_img = out["pred_images"]
+                pred_scalars_clamped = torch.clamp(compute_physical_scalars_from_image(pred_img), min=0.0)
 
-                # Accumuliamo i tensori così come sono su device
+                # Accumuliamo i tensori coerentemente tutti come matrici 2D [N, 3] o [N, cond_dim]
                 all_sim_scalars.append(s_scal)
                 all_pred_scalars.append(pred_scalars_clamped)
                 all_data_scalars.append(d_scal)
                 all_sim_cond.append(s_c)
                 all_data_cond.append(d_c)
 
-    # 2. CONVERSIONE IN NUMPY MASSIVA (Una volta sola alla fine)
+    # 2. CONVERSIONE IN NUMPY MASSIVA RIGIDAMENTE 2D [Tot_Clusters, 3]
     sim_sc = torch.cat(all_sim_scalars, dim=0).cpu().numpy()
     pred_sc = torch.cat(all_pred_scalars, dim=0).cpu().numpy()
     data_sc = torch.cat(all_data_scalars, dim=0).cpu().numpy()
+    
     sim_co = torch.cat(all_sim_cond, dim=0).cpu().numpy()
     data_co = torch.cat(all_data_cond, dim=0).cpu().numpy()
-    
+
+    # Verifica istantanea di sicurezza nei log (ora stamperà correttamente le colonne)
+    print(f"DEBUG MATRICI GRIGLIA -> sim_sc shape: {sim_sc.shape} | pred_sc shape: {pred_sc.shape}")
+        
     sim_co_rounded = np.round(sim_co, decimals=4)
     data_co_rounded = np.round(data_co, decimals=4)
 
@@ -1120,25 +1116,26 @@ def run_sampled_and_detailed_test(
     # --------------------------------------------------------
     # MODALITÀ A: GENERAZIONE DELLE GRIGLIE PER OGNI VARIABILE
     # --------------------------------------------------------
-    # Cerchiamo solo le combinazioni di (SIM, DATA) che sono EFFETTIVAMENTE presenti nel dataset
-    coppie_reali = np.unique(
-        np.hstack([sim_co_rounded, data_co_rounded]), axis=0
-    )
-    
-    # Filtriamo solo le prime combinazioni per rientrare nei limiti richiesti (es. 3x3)
     coppie_selezionate = coppie_reali[:(num_sim_ctx_to_sample * num_data_ctx_to_sample)]
     
     n_coppie = len(coppie_selezionate)
     if n_coppie == 0:
-        print("[ATTENZIONE] Nessuna combinazione trovata nei dati di test acumulati.")
+        print("[ATTENZIONE] Nessuna combinazione trovata nei dati di test accumulati.")
         return
 
-    # Calcoliamo una disposizione flessibile per la griglia (massimo 3 o 4 colonne per riga)
     n_cols = min(3, num_data_ctx_to_sample)
     n_rows = (n_coppie + n_cols - 1) // n_cols
 
-    for idx_var, var_name in enumerate(whitelist):
-        print(f"\t--> Generazione griglia elegante {n_rows}x{n_cols} per variabile: {var_name}...")
+    # Mappatura ordinata delle nostre variabili geometriche reali (lunghezza = 3)
+    whitelist_recomputed = ["integral_recomputed", "length_recomputed", "width_recomputed"]
+    
+    # Determiniamo dinamicamente il numero di scalari dall'array finale per sicurezza
+    num_scalars = sim_sc.shape[-1]
+    print(f"\t[TEST] Rilevati dinamicamente {num_scalars} scalari fisici da plottare nelle griglie.")
+    
+    for idx_var in range(num_scalars):
+        var_name = whitelist_recomputed[idx_var]
+        print(f"\t--> Generazione griglia elegante {n_rows}x{n_cols} per la variabile {var_name}...")
         
         fig, axes = plt.subplots(
             n_rows,
@@ -1147,49 +1144,85 @@ def run_sampled_and_detailed_test(
             squeeze=False
         )
         
-        # Appiattiamo gli assi per ciclarci sopra linearmente in modo comodo
         axes_flat = axes.flatten()
-
         idx_coppia = -1
+
         for idx_coppia, coppia in enumerate(coppie_selezionate):
             ax = axes_flat[idx_coppia]
             
-            # Scompattiamo le chiavi esatte
             s_ctx = coppia[:3]
-            d_ctx = coppia[3:]
+            d_ctx = coppia[3:]  # Contiene [z, P, T, H]
 
-            # Maschera super selettiva e pura
             mask_sim = np.isclose(sim_co_rounded, s_ctx, atol=1e-5).all(axis=1)
             mask_data = np.isclose(data_co_rounded, d_ctx, atol=1e-5).all(axis=1)
             mask = mask_sim & mask_data
 
+            # Ora sim_sc è rigidamente 2D, l'indicizzazione a due coordinate è sicura e corretta
             s_vals = sim_sc[mask, idx_var]
             p_vals = pred_sc[mask, idx_var]
             d_vals = data_sc[mask, idx_var]
 
-            bins = np.linspace(
-                min(s_vals.min(), p_vals.min(), d_vals.min()),
-                max(s_vals.max(), p_vals.max(), d_vals.max()),
-                30
+            # Se la maschera non seleziona eventi per questa combinazione, saltiamo il plot
+            if len(s_vals) == 0 or len(d_vals) == 0:
+                ax.text(0.5, 0.5, "No Data", transform=ax.transAxes, ha="center")
+                continue
+
+            # --------------------------------------------------------
+            # 1. RANGE DINAMICO BASATO SUI PERCENTILI (Rimuove gli Outlier)
+            # --------------------------------------------------------
+            all_vals_combined = np.concatenate([s_vals, p_vals, d_vals])
+            vmin = np.percentile(all_vals_combined, 1.0)   # Taglia l'1% più basso
+            vmax = np.percentile(all_vals_combined, 99.0)  # Taglia l'1% alto
+            
+            if vmin == vmax:
+                vmin, vmax = vmin - 1e-3, vmax + 1e-3
+
+            bins = np.linspace(vmin, vmax, 30)
+
+            # --------------------------------------------------------
+            # 2. DISEGNO DEI PLOT (SIM e PRED come Istogrammi)
+            # --------------------------------------------------------
+            ax.hist(s_vals, bins=bins, alpha=0.5, histtype="step", linewidth=2, label="SIM", color="tab:blue", density=True)
+            ax.hist(p_vals, bins=bins, alpha=0.7, histtype="step", linewidth=2, label="PRED", color="tab:orange", density=True)
+
+            # --------------------------------------------------------
+            # 3. DATA REALI COME PUNTI CON ERRORE POISSONIANO
+            # --------------------------------------------------------
+            counts, bin_edges = np.histogram(d_vals, bins=bins)
+            counts_density, _ = np.histogram(d_vals, bins=bins, density=True)
+            
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+            errors_raw = np.sqrt(counts)
+            
+            scaling_factor = np.where(counts > 0, counts_density / counts, 0.0)
+            errors_density = errors_raw * scaling_factor
+
+            valid_bins = counts > 0
+            ax.errorbar(
+                bin_centers[valid_bins],
+                counts_density[valid_bins],
+                yerr=errors_density[valid_bins],
+                fmt='o',
+                markersize=4,
+                color="black",
+                ecolor="black",
+                capsize=2,
+                label="DATA"
             )
 
-            # Disegno istogrammi con densità normalizzata
-            ax.hist(s_vals, bins=bins, alpha=0.5, histtype="step", linewidth=2, label="SIM", color="tab:blue", density=True)
-            ax.hist(p_vals, bins=bins, alpha=0.7, label="PRED", color="tab:orange", density=True)
-            ax.hist(d_vals, bins=bins, alpha=0.2, label="DATA", color="tab:green", hatch="//", density=True)
-
-            # Formattazione pulita ed elegante dei titoli (es: Z=100, A=0.1 | P=900, H=0.5)
+            # --------------------------------------------------------
+            # 4. TITOLO ELEGANTE CON COMPONENTE CONTESTO
+            # --------------------------------------------------------
             titolo_sim = f"SIM: z={int(s_ctx[0])}, α={s_ctx[1]:.2f}, λ={s_ctx[2]:.2f}"
-            titolo_data = f"DATA: z={int(d_ctx[0])}, P={int(d_ctx[1])}, T={d_ctx[2]:.1f}"
+            titolo_data = f"DATA: z={int(d_ctx[0])}, P={int(d_ctx[1])}, T={d_ctx[2]:.1f}, H={d_ctx[3]:.2f}"
             ax.set_title(f"{titolo_sim}\n{titolo_data}", fontsize=8, fontweight="bold")
             
             ax.grid(True, linestyle="--", alpha=0.4)
             ax.tick_params(axis='both', which='major', labelsize=8)
-            
-            # Mettiamo la legenda su OGNI pannello attivo per chiarezza fisica
             ax.legend(loc="upper right", fontsize=8)
 
-        # Spegniamo i pannelli della griglia rimasti vuoti (se le coppie reali non riempiono perfettamente la matrice)
+            ax.set_ylim(bottom=0.0)
+
         for idx_retro in range(idx_coppia + 1, len(axes_flat)):
             axes_flat[idx_retro].axis('off')
 
@@ -1198,7 +1231,7 @@ def run_sampled_and_detailed_test(
         plt.savefig(grid_path, dpi=120, bbox_inches="tight")
         plt.close()
         print(f"\t--> Griglia salvata con successo in: {grid_path}")
-        
+
 
     # 5. MODALITÀ B: PLOT SINGOLI 1D AD ALTA STATISTICA (Per tutte le combinazioni reali)
     if save_individual_plots:

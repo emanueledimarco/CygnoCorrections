@@ -1,5 +1,6 @@
 import numpy as np
 import uproot
+import torch
 
 class Cluster:
     def __init__(self, pix, scalars_dict, cond, meta=None):
@@ -8,7 +9,7 @@ class Cluster:
         self.cond = np.array(cond, dtype=np.float32)
         self.meta = meta or {}
 
-        # dinamically assign scalars as attributes
+        # dinamically assign scalars as attributes (fallback, use 
         for k, v in scalars_dict.items():
             setattr(self, k.replace("sc_",""), float(v))
 
@@ -45,6 +46,7 @@ class Cluster:
         img[y, x] += q
      
         return img
+
 
 def select_cluster(c, selection_cfg):
 

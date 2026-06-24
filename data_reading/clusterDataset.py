@@ -175,12 +175,22 @@ class ConditionalClusterDataset(Dataset):
             data_clusters = [data_cluster_list[i] for i in data_idx]
             
         else:
-            # --- MODALITÀ TRAINING: Stocastico standard ---
-            rng_train = np.random.RandomState(idx)
-            z = rng_train.choice(self.shared_z)
-            sim_key = rng_train.choice(self.sim_keys_by_z[z])
-            data_key = rng_train.choice(self.data_keys_by_z[z])
+            # --- MODALITÀ TRAINING: Stocastico con rng controllato ---
+            rng = np.random.RandomState(idx)
+            z = rng.choice(self.shared_z)
             
+            # Recuperiamo le liste di chiavi disponibili per questo specifico z
+            sim_options = self.sim_keys_by_z[z]
+            data_options = self.data_keys_by_z[z]
+            
+            # Scegliamo un INDICE intero casuale per SIM e DATA
+            idx_sim = rng.randint(0, len(sim_options))
+            idx_data = rng.randint(0, len(data_options))
+            
+            # Estraiamo la chiave corrispondente (la tupla originale rimane intatta)
+            sim_key = sim_options[idx_sim]
+            data_key = data_options[idx_data]
+
             sim_clusters = self.sample_clusters(self.sim_dict[sim_key])
             data_clusters = self.sample_clusters(self.data_dict[data_key])
 
