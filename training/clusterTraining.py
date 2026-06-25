@@ -131,12 +131,26 @@ class ClusterDecoder(nn.Module):
             )
         )
 
-    def forward(
-        self,
-        h
-    ):
-
+    def forward(self, h):
+        # 1. Proiezione lineare iniziale
         x = self.fc(h)
+
+        # 2. Reshape nello spazio delle feature iniziali [B, 256, 4, 4]
+        x = x.view(-1, 256, 4, 4)
+
+        # 3. Ciclo esplicito sequenziale su tutti i layer del Decoder
+        for layer in self.net:
+            x = layer(x)  # Passaggio attraverso il singolo strato (ConvTranspose o ReLU)
+            
+            # Se lo strato appena eseguito è una ReLU, iniettiamo le fluttuazioni
+            if isinstance(layer, nn.ReLU):
+                # Generiamo un rumore gaussiano con la stessa identica shape delle feature correnti
+                noise = torch.randn_like(x) * 0.05  # Puoi tarare lo 0.05 (la magnitudo del rumore)
+                x = x + noise
+
+        # 4. Ritorniamo x, che ha già attraversato tutta self.net ed è [B, 1, 64, 64]
+        return x
+        
 
         x = x.view(
             -1,
@@ -169,9 +183,9 @@ class DifferentialTransport(nn.Module):
 
         # ---------------------------------------
         # IMPORTANT: learnable residual scale
-        # starts at ZERO → identity at init (EDM ho messo 0.01 per non partire dall'identita' e non farlo rimanere bloccato)
+        # starts at ZERO → identity at init 
         # ---------------------------------------
-        self.gamma = nn.Parameter(torch.tensor(0.01))
+        self.gamma = nn.Parameter(torch.tensor(1.0))
 
         # ---------------------------------------
         # stable init
@@ -186,7 +200,7 @@ class DifferentialTransport(nn.Module):
                 nn.init.zeros_(m.bias)
 
         # final layer small init (NOT zero!)
-        nn.init.xavier_uniform_(self.net[-1].weight, gain=0.01)
+        nn.init.xavier_uniform_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
         
@@ -413,6 +427,48 @@ def build_dataloader(
     return dataset, loader
 
 
+def compute_centroids(images,eps=1e-4):
+    device = images.device
+    
+    # Se ci passano [B, N, H, W] o [N, C, H, W], collassiamo tutto ciò che sta prima di (H, W)
+    H, W = images.shape[-2], images.shape[-1]
+    imgs = images.view(-1, H, W) # Diventa rigidamente [Tot_Clusters, 64, 64]
+    L_batch = imgs.shape[0]      # Il vero numero di cluster totali da elaborare
+    
+    # Griglia di coordinate centrate (valori da -32 a 31)
+    y_indices, x_indices = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=device) - H // 2,
+        torch.arange(W, dtype=torch.float32, device=device) - W // 2,
+        indexing="ij"
+    )
+    
+    x_coords = x_indices.unsqueeze(0) # [1, H, W]
+    y_coords = y_indices.unsqueeze(0) # [1, H, W]
+    
+    imgs = torch.clamp(imgs, min=0.0)
+    
+    # --- A. INTEGRALE ---
+    integrals = torch.sum(imgs, dim=[1, 2]) # [L_batch]
+    integrals_safe = torch.where(integrals > eps, integrals, torch.tensor(eps, device=device))
+    
+    # --- B. CENTROIDI ---
+    x_c = torch.sum(imgs * x_coords, dim=[1, 2]) / integrals_safe # [L_batch]
+    y_c = torch.sum(imgs * y_coords, dim=[1, 2]) / integrals_safe # [L_batch]
+    x_c_grid = x_c.view(L_batch, 1, 1)
+    y_c_grid = y_c.view(L_batch, 1, 1)
+
+    x_centered = x_coords - x_c_grid
+    y_centered = y_coords - y_c_grid
+
+    return (x_centered,y_centered)
+
+def compute_centroid_loss(sim,pred):
+    sim_xc,sim_yc = compute_centroids(sim)
+    pred_xc,pred_yc = compute_centroids(pred)
+    # Forza il baricentro del cluster trasportato a non deviare dall'originale
+    L_centroid = torch.mean((sim_xc - pred_xc)**2 + (sim_yc - pred_yc)**2)
+    return L_centroid
+    
 def compute_mmd_rbf(X, Y):
     # Spostiamo temporaneamente i due piccoli vettori delle feature su CPU
     device_originale = X.device
@@ -549,6 +605,9 @@ def compute_cygno_loss(
     L_tv = total_variation(pred_clamped)
     L_lap = laplacian_smoothness(pred_clamped)
 
+    # Forza il baricentro del cluster trasportato a non deviare dall'originale
+    L_centroid = compute_centroid_loss(sim_images,pred)
+    
     # ------------------------------------------------------------
     # 5. Combinazione Pesata Finale con Nuovi Bilanciamenti
     # ------------------------------------------------------------
@@ -564,9 +623,11 @@ def compute_cygno_loss(
         +
         0.01 * L_tv       
         +
-        0.01 * L_lap      
+        0.01 * L_lap
         +
-        2.0 * L_identity
+        1.0 * L_centroid
+        +
+        0.1 * L_identity
     )
 
     loss_dict = {
@@ -578,6 +639,7 @@ def compute_cygno_loss(
         "transport": L_transport.item(),
         "totvar": L_tv.item(),
         "laplace": L_lap.item(),
+        "centroid": L_centroid.item(),
         "identity": L_identity.item() if isinstance(L_identity, torch.Tensor) else 0.0
     }
 
@@ -601,6 +663,7 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
         "transport": [],
         "totvar": [],
         "laplace": [],
+        "centroid": [],
         "delta_h": [],
         "identity": [],
     }
@@ -648,6 +711,7 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
             "transport": 0.0,
             "totvar": 0.0,
             "laplace": 0.0,
+            "centroid": 0.0,
             "identity": 0.0,
         }
 
@@ -711,6 +775,7 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
         epoch_stats["transport"].append(info_batch_accumulato["transport"])
         epoch_stats["totvar"].append(info_batch_accumulato["totvar"])
         epoch_stats["laplace"].append(info_batch_accumulato["laplace"])
+        epoch_stats["centroid"].append(info_batch_accumulato["centroid"])
         epoch_stats["identity"].append(info_batch_accumulato["identity"])
         epoch_stats["delta_h"].append(delta_h_norm_accumulata)
 
@@ -757,6 +822,7 @@ def train_model(inputfile,outputfile,epochs=10):
         "transport": [],
         "totvar": [],
         "laplace": [],
+        "centroid": [],
         "delta_h": []
     }
     
@@ -817,7 +883,11 @@ def plot_training_history(train_history):
         )
         plt.grid()
 
-    plt.show()
+        plt.tight_layout()
+        nameplot = f"training_history_loss_{key}.png"
+        plt.savefig(nameplot, dpi=120, bbox_inches="tight")
+        plt.close()
+        print(f"\t--> Saved the loss history plot in: {nameplot}")
 
 # === test of the training ===
 def test_training(
@@ -1005,7 +1075,7 @@ def test_training(
     plt.close()
     print(f"\t--> Griglia con 10 clusters salvata con successo in: {cluster_test_path}")
 
-    run_sampled_and_detailed_test(model,loader,device,max_batches=50,output_dir="plot/validation_plots",save_individual_plots=False)
+    run_sampled_and_detailed_test(model,loader,device,max_batches=100,output_dir="plot/validation_plots",save_individual_plots=False)
 
 def run_sampled_and_detailed_test(
     model,
