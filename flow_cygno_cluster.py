@@ -11,6 +11,7 @@ import hashlib
 
 from data_reading.read_data_2D import *
 from training.clusterTraining import forward_test, train_model, test_training, plot_training_history
+from training.validation import *
 
 if __name__ == "__main__":
 
@@ -53,3 +54,12 @@ if __name__ == "__main__":
         
     if args.test:
         test_training(outputmodel,inputfile)
+
+    if args.validate:
+        with open(inputfile, "rb") as f:
+            dataset_bundle = pickle.load(f)
+        sim_dict = dataset_bundle["sim"]
+        data_dict = dataset_bundle["data"]
+        metadata = dataset_bundle.get("metadata", {})
+        central_sim_key = (0.0214,1450) # alpha, lambda
+        run_validation_sweep_from_dict(outputmodel,metadata,sim_dict,data_dict,sweep_var="H")
