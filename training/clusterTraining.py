@@ -569,6 +569,7 @@ def compute_cygno_loss(
     pred_scalars,       # Vettore [N, 3] di [integral, length, width] da pred_images
     target_scalars,     # Vettore [N, 3] di [integral, length, width] da data_images
     delta_h,            # Vettore di spostamento latente del Flow
+    loss_weights,       # Vettore di pesi da passare alla combinazione delle loss
     pred_identity=None, # Immagine 2D dell'identità: [N, 1, 64, 64]
     sim_images=None     # Immagine 2D di partenza SIM: [N, 1, 64, 64]
 ):
@@ -638,13 +639,13 @@ def compute_cygno_loss(
     # 5. Combinazione Pesata Finale con Nuovi Bilanciamenti
     # ------------------------------------------------------------
     # Scaliamo L_integral per evitare che cannibalizzi i gradienti
-    gamma_mmd_shape_1d = 300.0
-    gamma_mmd_physics = 150.0
-    gamma_integral = 50.
-    gamma_transport = 0.1
-    gamma_tv = 0.05
-    gamma_lap = 0.05
-    gamma_centroid = 3.0
+    gamma_mmd_shape_1d = loss_weights["mmd_shape_1d"]
+    gamma_mmd_physics = loss_weights["mmd_physics"]
+    gamma_integral = loss_weights["integral"]
+    gamma_transport = loss_weights["transport"]
+    gamma_tv = loss_weights["tv"]
+    gamma_lap = loss_weights["lap"]
+    gamma_centroid = loss_weights["centroid"]
     gamma_identity = 0.0
     
     loss = (
@@ -684,7 +685,7 @@ def compute_cygno_loss(
 import numpy as np
 import torch
 
-def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
+def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batches=None):
 
     model.train()
 
@@ -785,6 +786,7 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
                 delta_h=out["delta_h"],
                 pred_identity=pred_identity_img,     # Immagine dell'identità per la loss di consistenza
                 sim_images=s_img,
+                loss_weights=loss_weights,
             )
 
             loss_batch_accumulata += loss_evento / B
@@ -817,7 +819,31 @@ def train_epoch(model, loader, optimizer, device="mps", max_batches=None):
 
 
 # === FULL TRAINING ===
-def train_model(inputfile,outputfile,epochs=5):
+
+def get_loss_weights(epoch, total_epochs):
+    # Definizione degli stati: [Inizio (focus fisico), Fine (focus morfologico)]
+    # Puoi aggiungere/rimuovere chiavi a piacimento
+    weights_schedule = {
+        "mmd_shape_1d": [100.0, 500.0],    # Aumentiamo l'importanza della forma nel tempo
+        "mmd_physics":  [400.0, 100.0],    # Diminuiamo la fisica man mano che viene appresa
+        "integral":     [100.0, 20.0],
+        "transport":    [0.1, 0.5],
+        "tv":           [0.1, 0.0],        # Eliminiamo progressivamente la TV se crea blur
+        "lap":          [0.05, 0.0],
+        "centroid":     [2.0, 1.0]
+    }
+    
+    # Calcolo del fattore di interpolazione (da 0.0 a 1.0)
+    alpha = min(epoch / total_epochs, 1.0)
+    
+    # Calcolo dei pesi correnti tramite interpolazione lineare
+    current_weights = {
+        k: (v[0] + (v[1] - v[0]) * alpha) 
+        for k, v in weights_schedule.items()
+    }
+    return current_weights
+
+def train_model(inputfile,outputfile,epochs=100):
     
     device = (
         "cuda"
@@ -857,14 +883,20 @@ def train_model(inputfile,outputfile,epochs=5):
     }
     
     print(f"Initialized the model. Now start the training on the device: {device}")
+    best_val_loss = float('inf')
     for epoch in range(epochs):
 
         print(f"\t|Start epoch n. {epoch}...")
 
+        # 1. Ottieni i pesi dinamici per questa epoca
+        gammas = get_loss_weights(epoch, epochs)
+        print(f"\t\t--> Will use the following loss weights: {gammas}")
+        
         stats = train_epoch(
             model,
             loader,
             optimizer,
+            gammas,
             device=device,
             max_batches=100
         )
@@ -881,6 +913,11 @@ def train_model(inputfile,outputfile,epochs=5):
                 f"{k}: "
                 f"{v:.4f}"
             )
+
+        if stats["loss"] < best_val_loss:
+            best_val_loss = stats["loss"]
+            torch.save(model.state_dict(), f"{outputfile.replace('last','best')}")
+            print(f"Nuovo miglior modello salvato all'epoca {epoch} con loss = {stats['loss']}")
                 
     torch.save(
         model.state_dict(),
@@ -989,19 +1026,16 @@ def test_training(
 
     sim_cond = batch["sim_cond"].to(device)
     data_cond = batch["data_cond"].to(device)
-
-    sim_scalars_raw = batch["sim_scalars"].to(device)
-    num_scal = sim_scalars_raw.shape[-1] # Numero di scalari totali ordinati alfabeticamente
     
     B, N, H, W = sim.shape
 
     sim_flat = sim.view(B * N, 1, H, W)
     data_flat = data.view(B * N, 1, H, W)
-    
+
     sim_cond_flat = (sim_cond.repeat_interleave(N, dim=0))
     data_cond_flat = (data_cond.repeat_interleave(N, dim=0))
 
-    sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
+    sim_scalars_flat = compute_physical_scalars_from_image(sim_flat)
 
     with torch.no_grad():
         out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
@@ -1061,15 +1095,14 @@ def test_training(
             sim = batch["sim_images"].to(device)
             sim_cond = batch["sim_cond"].to(device)
             data_cond = batch["data_cond"].to(device)
-            sim_scalars_raw = batch["sim_scalars"].to(device)
             
             B, N, H, W = sim.shape
             sim_flat = sim.view(B * N, 1, H, W)
+            sim_scalars_flat = torch.clamp(compute_physical_scalars_from_image(sim_flat), min=0.0).view(B, N, -1)
             
             # Espandiamo le condizioni per il match flat
             sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
             data_cond_flat = data_cond.repeat_interleave(N, dim=0)
-            sim_scalars_flat = sim_scalars_raw.view(B * N, num_scal)
 
             # Forward
             out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
