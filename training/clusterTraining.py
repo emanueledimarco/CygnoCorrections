@@ -385,6 +385,7 @@ def build_dataloader(
         n_clusters=32,
         shuffle=True,
         is_test=False,
+        num_workers=0
 ):
 
     dataset = ConditionalClusterDataset(
@@ -397,7 +398,7 @@ def build_dataloader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=0,
+        num_workers=num_workers,
         collate_fn=make_cygno_collate_fn(dataset)
     )
 

@@ -23,6 +23,7 @@ if __name__ == "__main__":
     parser.add_argument("--fwdtest",action="store_true",help="do the fwd test of the CYGNO transport model")
     parser.add_argument("--train",action="store_true",help="train the correction")
     parser.add_argument("--test",action="store_true",help="train the correction")
+    parser.add_argument("--validate",action="store_true",help="validate the correction by pure inference")
     args = parser.parse_args()
 
     #loop to read over network condigurations from the yaml file: - one way to do hyperparameter optimization
@@ -56,10 +57,44 @@ if __name__ == "__main__":
         test_training(outputmodel,inputfile)
 
     if args.validate:
+
+        sweep_vars = ["P","T","H"]
+
+        # -----------------------
+        # 0. Device setup
+        # -----------------------
+        device = None
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+
+        # -----------------------
+        # 1. Dataset reading and metadata (to find the keys)
+        # -----------------------
+        print("Data loading...")
+        batch_size = 256
+        _, loader = build_dataloader(inputfile, batch_size=batch_size, is_test=True, num_workers=0)
+
         with open(inputfile, "rb") as f:
             dataset_bundle = pickle.load(f)
-        sim_dict = dataset_bundle["sim"]
-        data_dict = dataset_bundle["data"]
         metadata = dataset_bundle.get("metadata", {})
-        central_sim_key = (0.0214,1450) # alpha, lambda
-        run_validation_sweep_from_dict(outputmodel,metadata,sim_dict,data_dict,sweep_var="H")
+        
+        # -----------------------
+        # 2. Load model
+        # -----------------------
+        print(f"\nLoading model from:\n{outputmodel}")
+        model = CygnoTransportModel().to(device)
+        model.load_state_dict(torch.load(outputmodel, map_location=device))
+
+        unique_z = sorted(list(set([k[0] for k in metadata["keys"]["data_keys"]])))
+        print(f"====> Will make data/MC comparison for these z values: {unique_z}")
+
+        for z_val in unique_z:
+            print(f"\n--- Data/MC for z = {z_val} cm... ---")
+            central_sim_key = (z_val,0.0214,1450.0) # z, alpha, lambda
+            for var in sweep_vars:
+                print(f"\n\t\t--> Testing variable {var} for median values of the other variables")
+                run_validation_sweep_from_dict(model,metadata,loader,inputfile,central_sim_key,sweep_var=var,device=device)
