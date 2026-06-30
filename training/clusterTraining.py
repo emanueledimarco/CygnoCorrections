@@ -381,7 +381,7 @@ from torch.utils.data import DataLoader
 
 def build_dataloader(
         inputfile,
-        batch_size=4,
+        batch_size=32,
         n_clusters=32,
         shuffle=True,
         is_test=False,
@@ -594,11 +594,21 @@ def compute_cygno_loss(
     # Normalizzazione a densità probabilistica spaziale (Somma dei pixel = 1)
     pred_n = pred_clamped / (pred_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
     data_n = data_clamped / (data_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
-
+    sim_n  = sim_images / (sim_images.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    
     pred_n_feat = extract_profiles_with_diagonals(pred_n)
     data_n_feat = extract_profiles_with_diagonals(data_n)
     L_mmd_shape_1d = compute_mmd_rbf(pred_n_feat, data_n_feat)
 
+    # Questa loss controlla la MORFOLOGIA pura, ignorando l'ampiezza dell'integrale (senza fare subito la media, con (reduction='none')
+    loss_pixel_matrix = F.smooth_l1_loss(pred_n, sim_n, beta=0.01, reduction='none')
+    # CORE-PRESERVING: Creiamo una maschera di peso basata sulla SIM.
+    # I pixel centrali (più luminosi nella SIM) avranno un peso molto maggiore.
+    # Normalizziamo la maschera in modo che il peso medio sia 1 per non sballare le scale dei gamma.
+    weight_mask = (sim_n / (sim_n.mean(dim=(-1, -2), keepdim=True) + 1e-8)).detach()
+    # Applichiamo i pesi e calcoliamo la media
+    L_pixel_shape_anchor = (loss_pixel_matrix * weight_mask).mean()
+    
     # ------------------------------------------------------------
     # 3. Supervisione Diretta delle Proprietà Fisiche *con scala assoluta* (Stabilizzata in Log) 
     # ------------------------------------------------------------
@@ -641,6 +651,7 @@ def compute_cygno_loss(
     # ------------------------------------------------------------
     # Scaliamo L_integral per evitare che cannibalizzi i gradienti
     gamma_mmd_shape_1d = loss_weights["mmd_shape_1d"]
+    gamma_shape_anchor = loss_weights["shape_anchor"]
     gamma_mmd_physics = loss_weights["mmd_physics"]
     gamma_integral = loss_weights["integral"]
     gamma_transport = loss_weights["transport"]
@@ -651,6 +662,8 @@ def compute_cygno_loss(
     
     loss = (
         gamma_mmd_shape_1d * L_mmd_shape_1d
+        +
+        gamma_shape_anchor * L_pixel_shape_anchor
         +
         gamma_mmd_physics * L_mmd_physics
         +
@@ -670,6 +683,7 @@ def compute_cygno_loss(
     loss_dict = {
         "total": loss.item(),
         "mmd_shape_1d": gamma_mmd_shape_1d * L_mmd_shape_1d.item(),
+        "shape_anchor": gamma_shape_anchor * L_pixel_shape_anchor.item(),        
         "mmd_physics": gamma_mmd_physics * L_mmd_physics.item(),
         "integral": gamma_integral * L_integral.item(),
         "transport": gamma_transport * L_transport.item(),
@@ -693,6 +707,7 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
     epoch_stats = {
         "loss": [],
         "mmd_shape_1d": [],
+        "shape_anchor": [],
         "mmd_physics": [],
         "integral": [],
         "transport": [],
@@ -740,6 +755,7 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
         info_batch_accumulato = {
             "total": 0.0,
             "mmd_shape_1d": 0.0,
+            "shape_anchor": 0.0,
             "mmd_physics": 0.0,
             "integral": 0.0,
             "transport": 0.0,
@@ -804,6 +820,7 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
         # Accumulo statistiche
         epoch_stats["loss"].append(info_batch_accumulato["total"])
         epoch_stats["mmd_shape_1d"].append(info_batch_accumulato["mmd_shape_1d"])
+        epoch_stats["shape_anchor"].append(info_batch_accumulato["shape_anchor"])
         epoch_stats["mmd_physics"].append(info_batch_accumulato["mmd_physics"])
         epoch_stats["integral"].append(info_batch_accumulato["integral"])
         epoch_stats["transport"].append(info_batch_accumulato["transport"])
@@ -820,24 +837,28 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
 
 
 # === FULL TRAINING ===
-
 def get_loss_weights(epoch, total_epochs):
-    # Definizione degli stati: [Inizio (focus fisico), Fine (focus morfologico)]
-    # Puoi aggiungere/rimuovere chiavi a piacimento
+    # Nuova schedulazione bilanciata per preservare la topologia 2D
     weights_schedule = {
-        "mmd_shape_1d": [100.0, 500.0],    # Aumentiamo l'importanza della forma nel tempo
-        "mmd_physics":  [400.0, 100.0],    # Diminuiamo la fisica man mano che viene appresa
-        "integral":     [100.0, 20.0],
-        "transport":    [0.1, 0.5],
-        "tv":           [0.1, 0.0],        # Eliminiamo progressivamente la TV se crea blur
-        "lap":          [0.05, 0.0],
-        "centroid":     [2.0, 1.0]
+        "mmd_shape_1d": [300.0, 300.0],   
+        
+        # 1. PASSA A UNA DINAMICA DECRESCENTE PER L'ANCORA
+        # Serve alta all'inizio per dare la forma iniziale, ma deve allentarsi 
+        # alla fine per permettere alla fisica di rifinire il trasporto.
+        "shape_anchor": [600.0, 200.0],  # Scende! Lascia spazio alla fisica sul finale
+        
+        # 2. MANTIENI LA FISICA COSTANTE E SOLIDA
+        # Non deve calare, altrimenti il modello si dimentica degli scalari target.
+        "mmd_physics":  [300.0, 300.0],   # Costante e robusta
+        
+        "integral":     [50.0, 50.0],
+        "transport":    [0.1, 0.2],        
+        "tv":           [0.05, 0.05],      
+        "lap":          [0.01, 0.01],      
+        "centroid":     [5.0, 5.0]         
     }
     
-    # Calcolo del fattore di interpolazione (da 0.0 a 1.0)
     alpha = min(epoch / total_epochs, 1.0)
-    
-    # Calcolo dei pesi correnti tramite interpolazione lineare
     current_weights = {
         k: (v[0] + (v[1] - v[0]) * alpha) 
         for k, v in weights_schedule.items()
@@ -899,7 +920,7 @@ def train_model(inputfile,outputfile,epochs=100):
             optimizer,
             gammas,
             device=device,
-            max_batches=100
+            max_batches=20 #100 ====> messo a 20 per test veloce !!
         )
 
         for k in train_history:
@@ -1108,7 +1129,11 @@ def test_training(
             # Forward
             out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
             pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
+            threshold_value = 0.2 
+            pred_clamped_flat = torch.where(pred_clamped_flat > threshold_value, pred_clamped_flat, torch.zeros_like(pred_clamped_flat))
+            # 3. Reshape finale a 4D delle immagini post-soglia
             pred_images = pred_clamped_flat.view(B, N, H, W)
+
             pred_scalars = torch.clamp(compute_physical_scalars_from_image(pred_images), min=0.0).view(B, N, -1)
             
             # Scegliamo il primo sotto-cluster (idx=0) di questo specifico batch
@@ -1140,8 +1165,13 @@ def test_training(
         
         # Nota: se i DATI reali hanno un guadagno intrinseco totalmente diverso, 
         # conviene lasciargli il suo vmax per studiare la shape, altrimenti mettiamo vmax anche qui
-        ax[i,2].imshow(test_datas[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
+        im_data = ax[i,2].imshow(test_datas[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
         ax[i,2].set_title(f"DATA (Batch {i})") if i==0 else None
+
+        cbar = fig.colorbar(im_data, ax=ax[i, 2], fraction=0.046, pad=0.05)
+        cbar.ax.tick_params(labelsize=8)
+        if i == 0:
+            cbar.set_label("Counts", fontsize=8)
         
     plt.tight_layout()
     cluster_test_path = os.path.join(output_dir, "clusters10_test.png")
