@@ -920,7 +920,7 @@ def train_model(inputfile,outputfile,epochs=100):
             optimizer,
             gammas,
             device=device,
-            max_batches=20 #100 ====> messo a 20 per test veloce !!
+            max_batches=100
         )
 
         for k in train_history:
