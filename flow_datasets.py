@@ -18,8 +18,8 @@ class UnpairedTransportDataset(torch.utils.data.Dataset):
             if len(df) > 0
         ]
         
-        self.source_keys = valid_sim_keys #list(source_data.keys())
-        self.target_keys = valid_data_keys #list(target_data.keys())
+        self.source_keys = valid_sim_keys
+        self.target_keys = valid_data_keys
         self.dtype=dtype
         
         self.source_data = source_data
@@ -29,6 +29,10 @@ class UnpairedTransportDataset(torch.utils.data.Dataset):
         # pre-calcolo mu/std per chiave
         self.source_scalers = get_scalers(source_data)
         self.target_scalers = get_scalers(target_data)
+
+        # nomi delle variabili (per salvare l'ordine nel pt e riaverlo nell'inferenza)
+        first_sim_item = source_data[next(iter(source_data))]
+        self.variables = list(first_sim_item.columns)
         
     def __len__(self):
         return max(len(self.source_keys), len(self.target_keys))
@@ -63,7 +67,7 @@ def get_scalers(dataframe_dic):
     for key, df in dataframe_dic.items():
         tensor = torch.tensor(df.values, dtype=torch.float32)
         mu = tensor.mean(dim=0)
-        std = tensor.std(dim=0)
+        std = tensor.std(dim=0, unbiased=False)
         # attenzione: evitare std=0
         std[std==0] = 1.0
         scalers[key] = {"mu": mu, "std": std}

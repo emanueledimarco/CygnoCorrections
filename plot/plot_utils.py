@@ -12,7 +12,19 @@ import os
 # Names of the used variables, I copied it here only so it is easier to use it acess the labels and names of teh distirbutions
 var_list = ["sc_integral",
             "sc_tgausssigma",
-            "sc_nhits"]
+            "sc_nhits",
+            "sc_width",
+            "sc_length",
+            "sc_rms"]
+
+var_titles = {"sc_integral"    : "light integral [counts]",
+              "sc_tgausssigma" : "$\sigma_{t}$ [pix]",
+              "sc_nhits"       : "$n_{hits}$ [counts]",
+              "sc_width"       : "width [pix]",
+              "sc_length"      : "length [pix]",
+              "sc_rms"         : "s.d. [pix]",
+              }
+
 
 # The next three functions are related to the plotting of the profiles of the LY as a function of cluster shape variables
 # This function calculate the means of the input quantiles! - Weighted mean, of couse.
@@ -72,19 +84,7 @@ def plott_noratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None
     ax.set_ylim(0, 1.15*ax.get_ylim()[1])
     ax.tick_params(labelsize=22)
 
-    if( "integral" in str(xlabel)  ):
-        xlabel_new = "light integral [counts]"
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'\sigma_{t} [pix]'
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "nhits" in str(xlabel)  ):
-        xlabel_new = r'n_{hits}'
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    else:
-        xlabel_new = xlabel.replace("sc_", "")
-        ax.set_xlabel( str(xlabel_new) , fontsize=26)
-    
+    ax.set_xlabel(var_titles[xlabel], fontsize=26)
     ax.tick_params(labelsize=24)
 
     # Create a custom legend handle to show a line
@@ -111,17 +111,15 @@ def plott_noratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None
     print(f"===> Validation save plot {output_filename}.pdf/png")
     for ext in ["png","pdf"]:
         fig.savefig(f"{output_filename}.{ext}")
-
+    plt.close()
     
 # this is the main plotting function, all the other will basically set up something to call this one in the end!
-def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
-
+def plott_ratio(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel,text=None):
     plt.close()
     fig, ax = plt.subplots(2, 1, gridspec_kw={'height_ratios': [4, 1]}, sharex=True)
     
-    # Check if ax[0] is indeed a matplotlib Axes object
     if not isinstance(ax[0], plt.Axes):
-        raise ValueError("ax[0] must be a matplotlib Axes object")
+        raise ValueError("ax must be a matplotlib Axes object")
         
     hep.histplot(
                 mc_hist,
@@ -163,19 +161,13 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
             flow='sum'
         )
 
-    ax[0].set_xlabel('')
     ax[0].margins(y=0.15)
     ax[0].set_ylim(0, 1.15*ax[0].get_ylim()[1])
     ax[0].tick_params(labelsize=22)
 
-    # Log scale for Iso variables
-    if( "Iso" in str(xlabel) or "DR" in str(xlabel) or "esE" in str(xlabel)  ): # or 'r9' in str(xlabel) or 's4' in str(xlabel)
-        ax[0].set_yscale('log')
-        #ax[0].set_ylim(0.001,( np.max(data_hist)/1.5e6 ))
-        ax[0].set_ylim(0.001, 12.05*ax[0].get_ylim()[1])
-        
-    # Line at 1
-    ax[1].axhline(1, 0, 1, label=None, linestyle='--', color="black", linewidth=1)#, alpha=0.5)
+    ax.set_xlabel(var_titles[xlabel], fontsize=26)
+    ax[0].tick_params(labelsize=24)
+    ax[1].set_ylim(0.79, 1.21)
 
     data_hist_numpy = data_hist.to_numpy()
     mc_hist_numpy   = mc_hist.to_numpy()
@@ -184,7 +176,9 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
     integral_data = data_hist.sum() * (data_hist_numpy[1][1] - data_hist_numpy[1][0])
     integral_mc = mc_hist.sum() * (mc_hist_numpy[1][1] - mc_hist_numpy[1][0])
 
-    # Ratio between normalizng flows prediction and data
+    print(f"integral_data = {integral_data}; integral_mc = {integral_mc}")
+    
+    # Ratio between normalizing flows prediction and data
     ratio = (data_hist_numpy[0] / integral_data) / ( (mc_hist_numpy[0] + 1e-15 ) / integral_mc)
     ratio = np.nan_to_num(ratio)
 
@@ -192,8 +186,11 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
     ratio_rw = (data_hist_numpy[0] / integral_data) / ( (mc_hist_rw_numpy[0] +1e-15 ) / integral_mc_rw)
     ratio_rw = np.nan_to_num(ratio_rw)
 
-    errors_nom = (np.sqrt(data_hist_numpy[0])/integral_data) / ( (mc_hist_numpy[0] + 1e-15 ) / integral_mc)
-    errors_nom = np.abs(np.nan_to_num(errors_nom))
+    print(f"integral_mc_rw = {integral_mc_rw}")
+
+    errors = (np.sqrt(data_hist_numpy[0])/integral_data) / ( (mc_hist_rw_numpy[0] + 1e-15 ) / integral_mc_rw)
+    errors = np.abs(np.nan_to_num(errors))
+    print("errors = ",errors)
 
     hep.histplot(
         ratio,
@@ -201,7 +198,7 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
         label=None,
         color="blue",
         histtype='errorbar',
-        yerr=errors_nom,
+        yerr=errors,
         markersize=12,
         elinewidth=3,
         alpha=1,
@@ -215,7 +212,7 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
         label=None,
         color="green",
         histtype='errorbar',
-        yerr=errors_nom,
+        yerr=errors,
         markersize=12,
         elinewidth=3,
         alpha=1,
@@ -223,36 +220,7 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
         xerr=True,
     )
 
-    bin_width = round(data_hist.axes[0].edges[1] - data_hist.axes[0].edges[0],2)
-    if "hoe" in str(xlabel):
-        bin_width = round(data_hist.axes[0].edges[1] - data_hist.axes[0].edges[0],3)
     
-    if( "Err" in str(xlabel) ):
-        ax[0].set_ylabel("a.u", fontsize=30)
-    else:
-        ax[0].set_ylabel("a.u", fontsize=30)
-    
-    ax[1].set_ylabel("Data / MC", fontsize=26)
-    
-    if( "integral" in str(xlabel)  ):
-        xlabel_new = "light integral [counts]"
-        ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "tgausssigma" in str(xlabel)  ):
-        xlabel_new = r'\sigma_{t} [pix]'
-        ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
-    elif( "nhits" in str(xlabel)  ):
-        xlabel_new = r'n_{hits}'
-        ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
-    else:
-        xlabel_new = xlabel.replace("sc_", "")
-        ax[1].set_xlabel( str(xlabel_new) , fontsize=26)
-    
-    ax[0].tick_params(labelsize=24)
-
-    ax[1].set_ylim(0.79, 1.21)
-    if( 'integral' in xlabel ):
-        ax[1].set_ylim(0, 1e4)
-
     # Create a custom legend handle to show a line
     from matplotlib.lines import Line2D
     line = Line2D([0], [0], color='blue', linewidth=3)
@@ -266,11 +234,8 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
     # Add the legend with the modified handles
     ax[0].legend(handles=handles, labels=labels, loc="upper right", fontsize=20)
     ax[0].text(0.05, 0.96, r'$^{55}Fe$ data/sim', transform=ax[0].transAxes, fontsize=20, verticalalignment='top')
-
-    hep.cms.label(data=True, ax=ax[0], loc=0, label = "Preliminary", com=13.6, lumi = 27.24)
-
-    # Remove the space between the subplots
-    plt.subplots_adjust(hspace=0)
+    if text:
+        ax[0].text(0.50,0.80, text, transform=ax[0].transAxes, fontsize=20, verticalalignment='top')
 
     ax[0].margins(x=0)
     ax[1].margins(x=0)
@@ -278,8 +243,12 @@ def plott(data_hist,mc_hist,mc_rw_hist ,output_filename,xlabel ):
     # Adjust the tight_layout to not add extra padding
     fig.tight_layout(h_pad=0, w_pad=0)
 
-    fig.savefig(output_filename)
+    print(f"===> Validation save plot {output_filename}.pdf/png")
+    for ext in ["png","pdf"]:
+        fig.savefig(f"{output_filename}.{ext}")
+    plt.close()
 
+    
 def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, params=None, doratio=False, suffix=None ):
 
     # Ensure the output directory exists
@@ -324,13 +293,13 @@ def plot_distributions( path, variables_to_plot, data_df, mc_df, corr_df=None, p
 
         text=None
         if params:
-            text = f"z = {params['ztrue_val']} cm\nSim: $\lambda_{{abs}}$={params['lambda_val']}mm, $\\alpha$={params['alpha_val']}\nData: P={params['P_val']}bar, T={params['T_val']}C"
+            text = f"z = {params['ztrue_val']} cm\nSim: $\lambda_{{abs}}$={params['lambda_val']}mm, $\\alpha$={params['alpha_val']}\nData: P={params['P_val']}bar, T={params['T_val']}C,\n         H={params['H_val']}a.u."
         # Plot and save the histograms
         suff=f"_{suffix}" if suffix else ""
         suff = suff.replace(".","p")
         output_path = os.path.join(path, f"{variable}{suff}")
         if doratio:
-            plott(data_hist, mc_hist, corr_hist, output_path, xlabel=variable)
+            plott_ratio(data_hist, mc_hist, corr_hist, output_path, xlabel=variable, text=text)
         else:
             plott_noratio(data_hist, mc_hist, corr_hist, output_path, xlabel=variable, text=text)
 

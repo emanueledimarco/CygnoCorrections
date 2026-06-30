@@ -14,10 +14,10 @@ import json
 
 
 from flow_datasets import UnpairedTransportDataset, build_val_case
-from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset
+from training_utils import SimulationCorrection, load_model, atomic_flow_test, print_numeric_validation, standardize_dataset, interleave
 from data_reading.read_data import read_reco_data_withselection, df_to_tree
 from plot.plot_utils import plot_distributions
-
+from plot.validation_utils import *
 
 if __name__ == "__main__":
 
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     cachedir = "data/cache"
     if not args.usecache:
         source_data_lists = defaultdict(list)
-        target_data = {}
+        target_data_lists = defaultdict(list)
      
         sim_map  = dictionary["data_inputs"]["sim_map"]
         data_map = dictionary["data_inputs"]["data_map"]
@@ -66,15 +66,20 @@ if __name__ == "__main__":
                             source_data_lists[mapkey].append(read_reco_data_withselection(variables,spectators,[rootfname],isdata=False))
                 else:
                     print("\t==> Data now...")
-                    for mapkey,rootfname in map_dic.items():
-                        target_data[mapkey] = read_reco_data_withselection(variables,spectators,[rootfname],isdata=True)
+                    for mapkey,files in map_dic.items():
+                        for rootfname in files:
+                            target_data_lists[mapkey].append(read_reco_data_withselection(variables,spectators,[rootfname],isdata=True))
 
         # merge the PDs for the sim, which have multiple files/key
         print("Concatenate now the split SIM datasets...")
         source_data = {}
+        target_data = {}
         for key,dfs in source_data_lists.items():
-            print(f"\tConcatenating {len(dfs)} datasets for key {key}.") 
+            print(f"\tConcatenating SIM: {len(dfs)} datasets for key {key}.") 
             source_data[key] = pd.concat(dfs, ignore_index=True)
+        for key,dfs in target_data_lists.items():
+            print(f"\tConcatenating DATA: {len(dfs)} datasets for key {key}.") 
+            target_data[key] = pd.concat(dfs, ignore_index=True)
         
         os.makedirs(cachedir, exist_ok=True)
         pd.to_pickle(source_data, f"{cachedir}/source_data.pkl")
@@ -103,20 +108,23 @@ if __name__ == "__main__":
         ztrueV  = float(dictionary["data_inputs"]["ztrue_ref"])
         PV      = float(dictionary["data_inputs"]["P_ref"])
         TV      = float(dictionary["data_inputs"]["T_ref"])
+        HV      = float(dictionary["data_inputs"]["H_ref"])
         ZV      = ztrueV   # float(dictionary["data_inputs"]["Z_ref"])
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
      
         # remove the validation case from the training datasets and add it to a separate dic
-        print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T) = ({ZV},{PV},{TV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
-     
+        print(f"Will use the case:\n\t(ztrue,alpha,lambda) = ({ztrueV},{alphaV},{lambdaV});\n\t(Z,P,T,H) = ({ZV},{PV},{TV},{HV})\nas the reference case to evaluate the metric during the training, so removing it from the training")
+
         source_key_V = (ztrueV,alphaV,lambdaV)
+        source_key_varnames = ["z","alpha","lambda"] # this is only to save them in the output file to make coherent inference
         if source_key_V in source_data:
             val_sim = source_data.pop(source_key_V,None)
         else:
             print(f"Warning, the element {source_key_V} is not among the simulation datasets")
      
-        target_key_V = (ZV,PV,TV)
+        target_key_V = (ZV,PV,TV,HV)
+        target_key_varnames = ["P","T","H"] # this is only to save them in the output file to make coherent inference
         if target_key_V in target_data:
             val_data = target_data.pop(target_key_V,None)
         else:
@@ -136,11 +144,11 @@ if __name__ == "__main__":
             device=device
         )
 
-        # context configuration
-        raw_context_dim = len(source_key_V) + len(target_key_V) - 1 # removed Z data
-
+        # context variables to store
+        context_varnames = source_key_varnames + target_key_varnames + ["latent_noise"]
+        
         # build the flow and train it
-        corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,raw_context_dim)
+        corrections = SimulationCorrection(str(conf),dictionary[conf],dataset,standardize,context_varnames)
 
         corrections.setup_flow()
         corrections.set_validation_case(val_case)
@@ -166,7 +174,9 @@ if __name__ == "__main__":
         flow, context_encoder, meta = load_model(checkpoint_path, device=device)
         print("Modello caricato!")
         print("Step migliore:", meta.get("best_step"))
-        print("Val MMD:", meta.get("best_val_mmd"))
+        print("Variables used:", meta.get("variables"))
+        print("Context variables used:", meta.get("context_variables"))
+        print("sigma latent used:", meta.get("sigma_latent"))
 
         # --- ESEMPIO: generiamo un caso di validazione per una coppia (x,y) ---
         # seleziona uno xy di validazione
@@ -177,66 +187,45 @@ if __name__ == "__main__":
         ztrue0=dictionary["data_inputs"]["ztrue_val"]
         P0=dictionary["data_inputs"]["P_val"]
         T0=dictionary["data_inputs"]["T_val"]
+        H0=dictionary["data_inputs"]["H_val"]
         Z0=ztrue0
 
         src_key_0 = (ztrue0,alpha0,lambda0)
-        tgt_key_0 = (Z0,P0,T0)
-
-        # context construction
-        src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
-        tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
-        tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
-        context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).unsqueeze(0)
+        tgt_key_0 = (Z0,P0,T0,H0)
 
         # dataframe -> torch tensors conversion
         A_sim_df  = source_data[src_key_0]
         A_data_df = target_data[tgt_key_0]
         A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
         A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
-        sigma_latent = 1.0
+
+        # context construction
+        src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
+        tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
+        tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
+        raw_context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).expand(A_sim.shape[0],-1)        
+        sigma_latent = meta.get("sigma_latent")
+        
         if standardize:
             A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
             A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
             z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
-            A_sim_scaled = A_sim_scaled + z_latent
         else:
             z_latent = sigma_latent * torch.randn_like(A_sim)
-            A_sim = A_sim + z_latent
-
+        context_input = torch.cat([raw_context, z_latent], dim=1)
         
         # --- APPLICA FLOW PER LA VALIDAZIONE --- #
         print ("EVALUATE FLOW")
-        # replica il context per ogni evento di A_sim_scaled
-        context_rep = context.repeat(A_sim_scaled.shape[0], 1)
-
-        # only for the test
-        src_key_rand = torch.tensor((15.0,0.0230,1850), dtype=torch.float32, device=device)
-        tgt_key_rand = torch.tensor((0.9031,21.1), dtype=torch.float32, device=device)
-        context_random = torch.cat([src_key_rand,tgt_key_rand]).unsqueeze(0)
-        context_random_rep = context_random.repeat(A_sim_scaled.shape[0], 1)
-        
-        # permuta A_sim_scaled
-        perm = torch.randperm(A_sim_scaled.shape[0])
-        A_sim_scaled_perm = A_sim_scaled[perm]
-
         
         with torch.no_grad():
-            cond = context_encoder(context_rep)
+            cond = context_encoder(context_input)
             A_corr_scaled, _ = flow(A_sim_scaled, cond)
-            cond_random = context_encoder(context_random_rep)
-            A_corr2, _ = flow(A_sim_scaled, cond_random)
-            A_corr_perm, _ = flow(A_sim_scaled_perm, cond)
-
-
-        delta = torch.mean((A_corr_scaled - A_corr2)**2).item()
-        print("Context sensitivity:", delta)
-        print("Permutation test:", torch.mean((A_corr_scaled - A_corr_perm)**2))
+            debug_variance(A_sim_scaled,raw_context,context_encoder,flow)
         
         if standardize:
             print("De-standardize A_corr")
             print(f"A_corr (scaled): mean={A_corr_scaled.mean(0)}, std={A_corr_scaled.std(0)}")
             A_corr = A_corr_scaled * std_data + mu_data
-            A_corr2 = A_corr2 * std_data + mu_data
             print(f"A_corr (un-scaled): mean={A_corr.mean(0)}, std={A_corr.std(0)}")
 
         print("FLOW done")
@@ -249,28 +238,19 @@ if __name__ == "__main__":
 
         # validazione numerica:
         print_numeric_validation(A_sim_scaled,A_data_scaled,A_corr_scaled)
-
-        print ("Test latent noise")
-        with torch.no_grad():
-            for i in range(10):
-                z = torch.randn_like(A_sim_scaled)
-                A_corr_i, _ = flow(A_sim_scaled + z, cond)
-                print(f"STD on the {i}th sample = {A_corr_i.std(0)}")
-
-        
-        import matplotlib.pyplot as plt
-        #plt.ion()
-        plt.hist(A_sim.cpu(), bins=30, density=True, alpha=0.4, label="sim")
-        plt.hist(A_data.cpu(), bins=30, density=True, alpha=0.4, label="data")
-        plt.hist(A_corr.cpu(), bins=30, density=True, alpha=0.4, label="corr")
-        plt.legend()
-        plt.savefig("basic_test.pdf")
-        plt.show(block=False)
-        
+        # global metrics:
+        metrics = compute_validation_metrics(A_corr_scaled,A_data_scaled)
+        print("==== GLOBAL VALIDATION ====")
+        for k,m in metrics.items():
+            print(f"{k} : {m}")
+        print("===========================")
         
         # --- CREAZIONE VALIDATOR --- #
         path_to_plots = "./plot/validation_plots/"
         plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=dictionary["data_inputs"], doratio=False)
+        if len(variables)>1:
+            vars_to_plot = random_ordered_pair(variables)
+            plot_2d_comparison(A_sim, A_corr, A_data, vars_to_plot, path_to_plots, params=dictionary["data_inputs"])
 
         # --- SALVA IL ROOT FILE CON IL TREE --- #
         output_root = "validation_output.root"
@@ -294,48 +274,53 @@ if __name__ == "__main__":
         print("Modello caricato!")
         print("Step migliore:", meta.get("best_step"))
         print("Val MMD:", meta.get("best_val_mmd"))
-
+        n_matrix = len(source_data.keys())*len(target_data.keys())
+        print(f"Matrix of tests: [{len(source_data.keys())}(sim)x{len(target_data.keys())}(data)] = {n_matrix} flows")
+        
+        metrics_list = []
+        ival=-1
         for sim_k in source_data.keys():
             Z,Alpha,Lambda = sim_k
             for data_k in target_data.keys():
-                _,P,T = data_k
+                # validazione e plot per casi selezionati ---
+                ival += 1
+                if ival%500!=0: continue
+                print(f"Validating combination # {ival} ...")
+                
+                _,P,T,H = data_k
 
                 src_key_0 = (Z,Alpha,Lambda)
-                tgt_key_0 = (Z,P,T)
+                tgt_key_0 = (Z,P,T,H)
 
                 # the Z is taken from sim, but it can be that the corresponding key in data is absent (not processed, not taken, etc)
                 if tgt_key_0 not in target_data:
                     continue
            
-                # context construction
-                src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
-                tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
-                tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
-                context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).unsqueeze(0)
            
                 # dataframe -> torch tensors conversion
                 A_sim_df  = source_data[src_key_0]
                 A_data_df = target_data[tgt_key_0]
                 A_sim  = torch.tensor(A_sim_df.values, dtype=torch.float32, device=device)
                 A_data = torch.tensor(A_data_df.values, dtype=torch.float32, device=device)
-                sigma_latent = 1.0
+                
+                # context construction
+                src_key_0_t = torch.tensor(src_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t = torch.tensor(tgt_key_0, dtype=torch.float32, device=device)
+                tgt_key_0_t_reduced = tgt_key_0_t[..., 1:] # remove Z from the target context
+                raw_context = torch.cat([src_key_0_t,tgt_key_0_t_reduced]).expand(A_sim.shape[0],-1)        
+                sigma_latent = meta.get("sigma_latent")
                 if standardize:
                     A_sim_scaled,mu_sim,std_sim = standardize_dataset(A_sim)
                     A_data_scaled,mu_data,std_data = standardize_dataset(A_data)
                     z_latent = sigma_latent * torch.randn_like(A_sim_scaled)
-                    A_sim_scaled = A_sim_scaled + z_latent
                 else:
                     z_latent = sigma_latent * torch.randn_like(A_sim)
-                    A_sim = A_sim + z_latent
-           
-                
+                context_input = torch.cat([raw_context, z_latent], dim=1)
+
                 # --- APPLICA FLOW PER LA VALIDAZIONE --- #
-                # replica il context per ogni evento di A_sim_scaled
-                context_rep = context.repeat(A_sim_scaled.shape[0], 1)
-                
                 with torch.no_grad():
-                    cond = context_encoder(context_rep)
-                    A_corr_scaled, _ = flow(A_sim_scaled, cond)           
+                    cond = context_encoder(context_input)
+                    A_corr_scaled, _ = flow(A_sim_scaled, cond)
                            
                 if standardize:
                     A_corr = A_corr_scaled * std_data + mu_data
@@ -346,12 +331,26 @@ if __name__ == "__main__":
                     A_corr.detach().cpu().numpy(),
                     columns=A_sim_df.columns
                 )
-           
+
+                metrics = compute_validation_metrics(A_corr_scaled,A_data_scaled)
+                metrics['case_idx'] = ival
+                metrics_list.append(metrics)
+                
                 # --- CREAZIONE VALIDATOR --- #
                 path_to_plots = "./plot/validation_plots/"
-                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}"
-                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T}
+                suffix = f"z-{Z}-alpha{Alpha}-lambda{Lambda}-P{P}-T{T}-H{H}"
+                params = { "ztrue_val": Z, "lambda_val": Lambda, "alpha_val": Alpha, "P_val": P, "T_val": T, "H_val": H}
+                
                 plot_distributions(path_to_plots, variables, A_data_df, A_sim_df, A_corr_df, params=params, doratio=False, suffix=suffix)
+                if len(variables)>1:
+                    vars_to_plot = random_ordered_pair(variables)
+                    plot_2d_comparison(A_sim, A_corr, A_data, vars_to_plot, path_to_plots, params=params, suffix=suffix)
+        
+        summary = aggregate_metrics(metrics_list)
+        print("==== GLOBAL VALIDATION ====")
+        for k, v in summary.items():
+            print(f"{k}: {v:.4f}")
+        print("===========================")
                 
     else:
         print("Specify at least --train or --validate or --matrix")

@@ -33,11 +33,18 @@ class ConditionalAffineCoupling(nn.Module):
         input_dim = self.dim_masked + context_dim
         self.st_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Linear(hidden_dim, 2 * self.dim_unmasked)
         )
+
+        nn.init.zeros_(self.st_net[-1].weight)
+        nn.init.zeros_(self.st_net[-1].bias)
+
+        # log_scale_factor per dare respiro alla varianza
+        self.rescale_s = nn.Parameter(torch.ones(self.dim_unmasked))
+        self.noise_gate = nn.Parameter(torch.zeros(1)) # all'inizio del training e' zero
 
     def forward(self, x, context=None):
         """
@@ -55,14 +62,7 @@ class ConditionalAffineCoupling(nn.Module):
         x_obs = x_flat[:, :base_dim]  
         x_masked = x_obs[:, base_mask_bool]
 
-        # --- mask esteso SOLO per decidere cosa trasformare ---
-        if x_flat.shape[1] > base_mask.shape[0]:
-            n_latent = x_flat.shape[1] - base_mask.shape[0]
-            latent_mask = torch.ones(n_latent, device=x.device)
-            full_mask = torch.cat([base_mask, latent_mask], dim=0)
-        else:
-            full_mask = base_mask
-
+        full_mask = base_mask # questo col latent noise nel contesto        
         full_mask_bool = full_mask.bool()
         
         # concatena context
@@ -80,7 +80,9 @@ class ConditionalAffineCoupling(nn.Module):
 
         # calcola scale e shift
         s, t = self.st_net(net_input).chunk(2, dim=1)
-        s = torch.tanh(s)  # stabilizza numericamente
+        # Usiamo tanh per stabilità ma permettiamo al parametro rescale_s 
+        # di imparare quanto "allargare" la distribuzione
+        s = torch.tanh(s) * self.rescale_s  
 
         # applica affine solo alle feature non mascherate
         y_flat = x_flat.clone()
@@ -108,17 +110,8 @@ class ConditionalAffineCoupling(nn.Module):
         y_obs = y_flat[:, :base_dim]
         y_masked = y_obs[:, base_mask_bool]
 
-        # --- mask esteso SOLO per decidere cosa trasformare ---
-        if y_flat.shape[1] > base_mask.shape[0]:
-            n_latent = y_flat.shape[1] - base_mask.shape[0]
-            latent_mask = torch.ones(n_latent, device=y.device)
-            full_mask = torch.cat([base_mask, latent_mask], dim=0)
-        else:
-            full_mask = base_mask
-
+        full_mask = base_mask
         full_mask_bool = full_mask.bool()
-
-
         
         if context is not None:
             context_flat = context.view(y_masked.shape[0], -1)
@@ -127,7 +120,7 @@ class ConditionalAffineCoupling(nn.Module):
             net_input = y_masked
 
         s, t = self.st_net(net_input).chunk(2, dim=1)
-        s = torch.tanh(s)
+        s = torch.tanh(s) * self.rescale_s
 
         x_flat = y_flat.clone()
         x_flat[:, (~full_mask_bool)] = (y_flat[:, (~full_mask_bool)] - t) * torch.exp(-s)
@@ -135,7 +128,16 @@ class ConditionalAffineCoupling(nn.Module):
         x = x_flat.view(*orig_shape)
         log_det = -s.sum(dim=1)
 
-        return x    
+        return x
+
+    def get_diagnostics(self):
+        with torch.no_grad():
+            scales = self.rescale_s.detach().cpu()
+            return {
+                "rescale_s_mean": scales.mean().item(),
+                "rescale_s_max": scales.max().item(),
+                "rescale_s_min": scales.min().item()
+            }
 
 def sanity_check_coupling(flow, context_encoder, device="cpu"):
     flow.eval()
@@ -143,37 +145,20 @@ def sanity_check_coupling(flow, context_encoder, device="cpu"):
 
     with torch.no_grad():
         B = 10
-        x = torch.randn(B, flow.dim)
-        z = torch.randn_like(x)
-        x_in = torch.cat([x, z], dim=1)
-        
-        dummy_context = torch.zeros(B, flow.context_dim) if flow.context_dim > 0 else None
-        
-        y, _ = flow(x_in, dummy_context)
-        x_rec = flow.inverse(y, dummy_context)
+        x_in = torch.randn(B, flow.dim)
+
+        if flow.context_dim > 0:
+            raw_context = torch.randn(B, context_encoder.input_dim).to(device)
+            context = context_encoder(raw_context)
+        else:
+            context = None
+
+        y, _ = flow(x_in, context)
+        x_rec = flow.inverse(y, context)
 
         print("[SANITY CHECK] max |x - inverse(forward(x))| =",
               (x_in - x_rec).abs().max().item())
     
-    # with torch.no_grad():
-    #     B = 10
-    #     # prendi un layer reale dal flow
-    #     layer = flow.layers[0]
- 
-    #     D = flow.dim
-    #     context_dim = context_encoder.output_dim
- 
-    #     x = torch.randn(B, D, device=device)
-        
-    #     context = torch.randn(10, context_dim, device=device)
- 
-    #     y, _ = layer(x, context)
-    #     x_rec = layer.inverse(y, context)
- 
-    #     max_err = (x - x_rec).abs().max().item()
-    #     print(f"[SANITY CHECK] max |x - inverse(forward(x))| = {max_err:.3e}")
- 
-    #     assert max_err < 1e-6, "Coupling layer is NOT invertible!"
 
 class ConditionalFlow(nn.Module):
     def __init__(self, dim, n_layers, hidden_dim, masks, context_dim=0):
@@ -194,7 +179,7 @@ class ConditionalFlow(nn.Module):
         self.layers = nn.ModuleList([
             ConditionalAffineCoupling(
                 dim=dim,
-                context_dim=context_dim,
+                context_dim=context_dim, # dimensione del contesto (alpha,lambda,P,T,z) + dimensione del noise latente (= n. di variabili da trasformare)
                 mask=masks[i],
                 hidden_dim=hidden_dim
             )
@@ -216,6 +201,8 @@ class ConditionalFlow(nn.Module):
         for layer in self.layers:
             y, log_det = layer(y, context)
             log_det_total += log_det
+            # diagnostics = layer.get_diagnostics()
+            # print(f"Scale stats: {diagnostics}")
         return y, log_det_total
 
     def inverse(self, z, context=None):
@@ -263,7 +250,7 @@ class ContextEncoder(nn.Module):
         hidden_dim,
         output_dim,
         n_layers=2,
-        activation=nn.ReLU,
+        activation=nn.ELU,
         dropout=0.0
     ):
         super().__init__()
@@ -416,6 +403,16 @@ def compute_mean_anchor_loss(A_corr, A_data):
     mean_anchor_loss = (mu_corr - mu_data.detach()).pow(2).mean()
     return mean_anchor_loss
 
+# this is relevant in >1 dim
+def compute_cov_loss(A_corr, A_data):
+    A_corr_c = A_corr - A_corr.mean(0)
+    A_data_c = A_data - A_data.mean(0)
+
+    cov_corr = (A_corr_c.T @ A_corr_c) / A_corr.shape[0]
+    cov_data = (A_data_c.T @ A_data_c) / A_data.shape[0]
+
+    return (cov_corr - cov_data).pow(2).mean()
+
 def standardize(x, mu, std):
     return (x - mu) / std
 
@@ -437,7 +434,7 @@ def compute_val_mmd(flow, context_encoder, val_case, n_events):
     return loss
 
 @torch.no_grad()
-def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom=1e-4, lambda_logstd=0.0, lambda_var=0.1,lambda_mean_anchor=0.2,sigma_latent=1):
+def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom=1e-4, lambda_logstd=0.0, lambda_var=0.1,lambda_mean_anchor=0.2,lambda_cov=0.1,sigma_latent=1):
     # Subsampling uniforme sulla distribuzione di validazione
     A_sim  = subsample_dynamic(val_case["A_sim"],  n_events)
     A_data = subsample_dynamic(val_case["A_data"], n_events)
@@ -453,9 +450,18 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
     
     #print(f"VALIDATION SAMPLE (after standardization): mu_sim={A_sim_scaled.mean(dim=0)}, std_sim={A_sim_scaled.std(dim=0)}, mu_data={A_data_scaled.mean(dim=0)}, std_data={A_data_scaled.std(dim=0)}")
     
-    # Passaggio attraverso il flow
-    context = val_case["context"].repeat(len(A_sim), 1)
-    cond = context_encoder(context)
+    # Passaggio attraverso il flow. Il val_case non ha il latent noise. Quindi aggiungiamone uno dummy per mantenere la shape
+    # val_case context originale (5 variabili)
+    raw_context_val = val_case["context"]  # (1,5) se è 1D
+    
+    # aggiungo latent fittizio (zeros) per avere input_dim = 7
+    latent_dummy = torch.zeros(raw_context_val.shape[0], flow.dim)  # flow.dim = numero di variabili da trasformare
+    context_val_input = torch.cat([raw_context_val, latent_dummy], dim=1)  # (1,7)
+
+    # passa all'encoder
+    cond = context_encoder(context_val_input)
+    # context = val_case["context"].repeat(len(A_sim), 1)
+    # cond = context_encoder(context)
 
     # media su K ~ 10 z latent noises (to avoid to pick a fluc of the latent noise)
     val_losses = {
@@ -463,21 +469,27 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
         "moment_loss": [],
         "logstd_loss": [],
         "var_floor_loss": [],
-        "mean_anchor_loss": []
+        "mean_anchor_loss": [],
+        "cov_loss": [],
     }
         
     K=10    # K = 5 o 10
     for k in range(K):
         z_latent = torch.randn_like(A_sim_scaled) * sigma_latent
-        A_corr_input, _ = flow(torch.cat([A_sim_scaled, z_latent], dim=-1), cond)
-        A_corr_obs = A_corr_input[:, :flow.dim]
+        N = len(A_sim_scaled)
+        raw_context_val_exp = raw_context_val.expand(N, -1)
+        context_val_input = torch.cat([raw_context_val_exp, z_latent], dim=1)
+        cond = context_encoder(context_val_input)
+        A_corr, _ =  flow(A_sim_scaled, cond)
+        
         # --- Calcolo dei termini della loss ---
-        val_losses["loss_mmd"].append(conditional_mmd(A_corr_obs, A_data_scaled) )
-        val_losses["moment_loss"].append(compute_moment_loss(A_corr_obs,A_data_scaled) )
-        val_losses["logstd_loss"].append(compute_logstd_loss(A_corr_obs,A_data_scaled) )
-        val_losses["var_floor_loss"].append(compute_var_floor_loss(A_corr_obs,A_data_scaled) )
-        val_losses["mean_anchor_loss"].append(compute_mean_anchor_loss(A_corr_obs,A_data_scaled) )
-
+        val_losses["loss_mmd"].append(conditional_mmd(A_corr, A_data_scaled) )
+        val_losses["moment_loss"].append(compute_moment_loss(A_corr,A_data_scaled) )
+        val_losses["logstd_loss"].append(compute_logstd_loss(A_corr,A_data_scaled) )
+        val_losses["var_floor_loss"].append(compute_var_floor_loss(A_corr,A_data_scaled) )
+        val_losses["mean_anchor_loss"].append(compute_mean_anchor_loss(A_corr,A_data_scaled) )
+        val_losses["cov_loss"].append(compute_cov_loss(A_corr,A_data_scaled) )
+        
     for k,loss in val_losses.items():
         val_losses[k] = torch.stack(val_losses[k]).mean()
 
@@ -490,6 +502,7 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
         + lambda_logstd * val_losses["logstd_loss"]
         + lambda_var * val_losses["var_floor_loss"]
         + lambda_mean_anchor * val_losses["mean_anchor_loss"]
+        + lambda_cov * val_losses["cov_loss"]
     )
     
     print(
@@ -499,6 +512,7 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
         f"LOGSTD {val_losses['logstd_loss'].item():.4f} | "
         f"VARFLOOR {val_losses['var_floor_loss'].item():.4f} | "
         f"MEANANCHOR {val_losses['mean_anchor_loss'].item():.4f} | "
+        f"COV {val_losses['cov_loss'].item():.4f} | "
         f"TOTAL {total_loss.item():.4f} "
     )
 
@@ -508,15 +522,17 @@ def compute_val_total_loss(flow, context_encoder, val_case, n_events, lambda_mom
         "moment_loss": val_losses["moment_loss"].item(),
         "logstd_loss": val_losses["logstd_loss"].item(),
         "var_floor_loss": val_losses["var_floor_loss"].item(),
-        "mean_anchor_loss": val_losses["mean_anchor_loss"].item()
+        "mean_anchor_loss": val_losses["mean_anchor_loss"].item(),
+        "cov_loss": val_losses["cov_loss"].item(),
     }
 
 class SimulationCorrection():
 
-    def __init__(self, configuration, conf_dic, dataset, standardize, encoder_input_dim):
+    def __init__(self, configuration, conf_dic, dataset, standardize,context_variables):
 
         # Name of the variables used as conditions and during training
         self.dataset = dataset
+        self.variables = dataset.variables
         self.standardize = standardize
         
         # Checking if cuda is avaliable
@@ -524,7 +540,8 @@ class SimulationCorrection():
         device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
         self.device = device
 
-        self.encoder_input_dim = encoder_input_dim
+        self.encoder_context_variables = context_variables
+        self.encoder_input_dim = len(context_variables) + len(self.variables) - 1 # context variables - latent noise + variables
         self.encoder_hidden_dim = conf_dic["encoder_hidden_dim"]
         self.encoder_output_dim = conf_dic["encoder_output_dim"]
         self.encoder_n_layers = conf_dic["encoder_n_layers"]
@@ -541,6 +558,7 @@ class SimulationCorrection():
         self.lambda_var       = float(conf_dic["lambda_var"])
         self.lambda_logstd    = float(conf_dic["lambda_logstd"])
         self.lambda_mean_anchor    = float(conf_dic["lambda_mean_anchor"])
+        self.lambda_cov       = float(conf_dic["lambda_cov"])
 
         self.sigma_latent = float(conf_dic["sigma_latent"])
         
@@ -566,15 +584,17 @@ class SimulationCorrection():
 
         self.masks = generate_alternating_masks(self.D, self.flow_n_layers)
 
+        print (f"self.encoder_input_dim = {self.encoder_input_dim}, self.encoder_output_dim = {self.encoder_output_dim}")
+        self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
+
         self.flow = ConditionalFlow(dim=self.D,
                                     n_layers=self.flow_n_layers,
                                     hidden_dim=self.flow_hidden_dim,
                                     masks=self.masks,
-                                    context_dim=self.flow_context_dim).to(self.device)
+                                    context_dim=self.encoder_output_dim).to(self.device)
 
         assert self.flow.dim == self.D
-        
-        self.context_encoder = ContextEncoder(input_dim=self.encoder_input_dim, hidden_dim=self.encoder_hidden_dim, output_dim=self.encoder_output_dim, n_layers=self.encoder_n_layers, dropout=self.encoder_dropout).to(self.device)
+
         sanity_check_coupling(self.flow, self.context_encoder, device=self.device)
         sanity_check_flow(self.flow, self.context_encoder, device=self.device)
 
@@ -656,25 +676,27 @@ class SimulationCorrection():
             A_sim_sub = A_sim_full_scaled.clone()
         if A_data_sub.shape[1] == 0:
             A_data_sub = A_data_full_scaled.clone()
-     
+
+        sim_key_exp = sim_key.unsqueeze(0).expand(N, -1)           # (N, 3)
+        data_key_exp = data_key_reduced.unsqueeze(0).expand(N, -1) # (N, 2)
         z_latent = self.sigma_latent * torch.randn_like(A_sim_sub) # sigma_latent ~ 1: scala circa pari a std dei dati nello spazio standardizzato
+        
         # Combina input con latent
-        A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
-        A_corr_obs = A_corr_input[:, :flow.dim]
+        # A_corr_input = torch.cat([A_sim_sub, z_latent], dim=-1) # versione "latent in coda"
+        # A_corr_input = interleave(A_sim_sub, z_latent)   # (N, 2D), versione "latent mescolato con gli obs"
         # A_corr_input = A_sim_sub + z_latent # version "latend perturba ogni variabile"
+        # nella versione in cui il latent e' nel context, A_corr_input = A_sim_sub
+        A_corr_input = A_sim_sub
         
         # --- Costruzione del contesto ---
         # --- fundamental (previous bug): context event by event, so for each batch, the context
         #     (alpha,beta,x,y) is always the same
-        context_vals = torch.cat([sim_key, data_key_reduced], dim=0)  # (C=Cs+Cd,)
-     
-        context = context_vals.unsqueeze(0).expand(N, -1)  # (N,C)
-        assert context_vals.dim() == 1, context_vals.shape
-        assert context.shape == (N, context_vals.numel())
-        cond = context_encoder(context)
-     
+        context_vals = torch.cat([sim_key_exp, data_key_exp, z_latent], dim=1)  # (B,C=Cs+Cd+dim_latent)
+        cond = context_encoder(context_vals)
+
+        
         # --- forward pass ---
-        A_corr_scaled, _ = flow(A_corr_obs, cond)    
+        A_corr_scaled, _ = flow(A_corr_input, cond)    
         # print("A_sim_full mean/std:",
         #       A_sim_full.mean().item(),
         #       A_sim_full.std().item())
@@ -687,6 +709,9 @@ class SimulationCorrection():
      
         # if math.isnan(A_sim_full.std().item()):
         #     print ("Problematic tensor  = ",A_sim_full)
+
+        # remove the latent noise and leave only the observables
+        # A_corr_obs = A_corr_scaled[:, :flow.dim] # slice only the observables (versione "latent in coda")
         
         # --- calcolo loss ---
         if test_identity:
@@ -705,9 +730,9 @@ class SimulationCorrection():
             id_loss = torch.tensor(0.0, device=A_corr_scaled.device)
      
             n_data_feat = A_data_sub.shape[1]
-            # A_corr_for_mmd = A_corr_scaled[:, :n_data_feat]  # ignora latent in coda nella versione "in coda"
+
             # align MMD with data
-            A_corr_for_mmd = A_corr_scaled - mu_data.detach() # nella versione "latent perturba le variabili direttamente"
+            A_corr_for_mmd = A_corr_scaled - mu_data.detach()
             A_data_sub_mmd = A_data_sub    - mu_data.detach()
             loss_mmd = conditional_mmd(A_corr_for_mmd, A_data_sub_mmd)
      
@@ -725,13 +750,20 @@ class SimulationCorrection():
         logstd_loss_val = compute_logstd_loss(A_corr_scaled,A_data_sub)
         var_floor_loss_val = compute_var_floor_loss(A_corr_scaled,A_data_sub)
         mean_anchor_loss_val = compute_mean_anchor_loss(A_corr_scaled,A_data_sub)
-
-        if step%100 == 0:
-            print("STD CORR (batch):", A_corr_scaled.std(0, unbiased=False))
-            print("STD DATA (batch):", A_data_sub.std(0, unbiased=False))
+        cov_loss_val = compute_cov_loss(A_corr_scaled,A_data_sub)
         
+        # if step%100 == 0:
+        #     print("Means CORR (batch):", A_corr_scaled.mean(0))
+        #     print("Means DATA (batch):", A_data_sub.mean(0))
+
+        #     print("Std CORR (batch):", A_corr_scaled.std(0, unbiased=False))
+        #     print("Std DATA (batch):", A_data_sub.std(0, unbiased=False))
+
+        #     print("Cov CORR (batch):", torch.cov(A_corr_scaled.T))
+        #     print("Cov DATA (batch):", torch.cov(A_data_sub.T))
+
         if step==0:
-            print(f"Training lambdas: mom={self.lambda_mom}, logstd={self.lambda_logstd}, var={self.lambda_var}, mean_anchor={self.lambda_mean_anchor}")
+            print(f"Training lambdas: mom={self.lambda_mom}, logstd={self.lambda_logstd}, var={self.lambda_var}, mean_anchor={self.lambda_mean_anchor}, cov={self.lambda_cov}")
         
         # Total loss combinata
         total_loss = (
@@ -740,6 +772,7 @@ class SimulationCorrection():
             + self.lambda_logstd * logstd_loss_val
             + self.lambda_var * var_floor_loss_val
             + self.lambda_mean_anchor * mean_anchor_loss_val
+            + self.lambda_cov * cov_loss_val
         )
      
         if step == 0:
@@ -749,6 +782,7 @@ class SimulationCorrection():
                 (self.lambda_mom * moment_loss).item(),
                 (self.lambda_logstd * logstd_loss_val).item(),
                 (self.lambda_mean_anchor * mean_anchor_loss_val).item(),
+                (self.lambda_cov * cov_loss_val).item(),                
                 "=>",
                 total_loss.item()
             )
@@ -767,6 +801,7 @@ class SimulationCorrection():
             "logstd_loss": logstd_loss_val.item(),
             "var_floor_loss": var_floor_loss_val.item(),
             "mean_anchor_loss": mean_anchor_loss_val.item(),
+            "cov_loss": cov_loss_val.item(),
             "skip": False
         }
 
@@ -797,6 +832,7 @@ class SimulationCorrection():
                     f"LOGSTD {losses['logstd_loss']:.4f} | "
                     f"VARFLOOR {losses['var_floor_loss']:.4f} | "
                     f"MEANANCHOR {losses['mean_anchor_loss']:.4f} | "
+                    f"COV {losses['cov_loss']:.4f} | "
                     f"TOTAL {losses['loss']:.4f} "
                 )
                 
@@ -812,6 +848,7 @@ class SimulationCorrection():
                     self.lambda_logstd,
                     self.lambda_var,
                     self.lambda_mean_anchor,
+                    self.lambda_cov,
                     self.sigma_latent
                 )
                 val_total_loss = val_losses["total_loss"]
@@ -832,7 +869,14 @@ class SimulationCorrection():
                         "context_config": self.context_encoder.get_config(),
                         "best_step": step,
                         "best_val_total_loss": best_val_total_loss,
-                        "lambda_mom": self.lambda_mom
+                        "lambda_mom": self.lambda_mom,
+                        "lambda_logstd": self.lambda_logstd,
+                        "lambda_var": self.lambda_var,
+                        "lambda_mean_anchor": self.lambda_mean_anchor,
+                        "lambda_cov": self.lambda_cov,
+                        "sigma_latent": self.sigma_latent,
+                        "variables": self.variables,
+                        "context_variables": self.encoder_context_variables,
                     }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
                 
                     print(f"  ✓ new best model at step {step} (val total loss {val_total_loss:.4f})")
@@ -845,36 +889,6 @@ class SimulationCorrection():
                     break
             
             
-            # if step % val_every == 0 and step > 0:
-
-            #     val_mmd = compute_val_mmd(self.flow, self.context_encoder, self.val_case, self.batch_size)
-         
-            #     print(f"  → Validation MMD = {val_mmd:.4f}")
-         
-            #     if val_mmd < best_val_mmd - min_delta:
-            #         best_val_mmd = val_mmd
-            #         best_step = step
-
-            #         # Save the output
-            #         torch.save({
-            #             "flow_state": self.flow.state_dict(),
-            #             "context_state": self.context_encoder.state_dict(),
-            #             "flow_config": self.flow.get_config(),
-            #             "context_config": self.context_encoder.get_config(),
-            #             "best_step": step,
-            #             "best_val_mmd": best_val_mmd,
-            #             "lambda_mom": self.lambda_mom
-            #         }, os.getcwd() + "/results/" + self.configuration + "/saved_states/best_model.pt")
-         
-            #         print(f"  ✓ new best model at step {step}")
-         
-            #     elif step - best_step > patience:
-            #         print(
-            #             f"Early stopping at step {step} "
-            #             f"(best step {best_step}, val MMD {best_val_mmd:.4f})"
-            #         )
-            #         break
-                   
 def load_model(
     checkpoint_path,
     device="cpu",
@@ -971,7 +985,36 @@ def generate_alternating_masks(dim, n_layers):
         masks.append(mask)
     return masks
 
+def generate_interleaved_permuted_masks(dim, n_layers, seed=None):
+    """
+    Maschere per input interleaved x|z: [x1,z1,x2,z2,...]
+    Con permutazioni layer-per-layer per evitare che il latent venga ignorato.
+    
+    dim      : dimensione totale (x+z), es. 4 per 2D x + 2D z
+    n_layers : numero di coupling layers
+    seed     : opzionale, per riproducibilità
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+    
+    masks = []
+    indices = torch.arange(dim)
+    
+    for i in range(n_layers):
+        # Permutazione ciclica delle variabili per ogni layer
+        permuted = indices.roll(shifts=i, dims=0)
+        
+        mask = torch.zeros(dim)
+        # Alterna 1 e 0 lungo la permutazione
+        mask[permuted[::2]] = 1
+        
+        masks.append(mask)
+    
+    return masks
 
+# this is to mix the observables with the latent noise to couple more the two
+def interleave(x, z):
+    return torch.stack([x, z], dim=-1).view(x.shape[0], -1)
 
 
 
@@ -989,7 +1032,6 @@ def print_numeric_validation(A_sim,A_data,A_corr):
         A_data = A_data.squeeze(0)
     if A_corr.ndim == 3:
         A_corr = A_corr.squeeze(0)
-
 
     mean_sim = A_sim.mean(0)
     std_sim  = A_sim.std(0)

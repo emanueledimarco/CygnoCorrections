@@ -5,15 +5,17 @@ data_inputs:
     alpha_ref  : 0.0210
     lambda_ref : 1350
     ztrue_ref  : 25.0
-    P_ref      : 0.9070
-    T_ref      : 20.6
+    P_ref      : 0.916
+    T_ref      : 21.4
+    H_ref      : 1.1
     sim_map    : simulation_map.yaml
     data_map   : data_map.yaml
     alpha_val  : 0.0202
     lambda_val : 1050
     ztrue_val  : 25.0
-    P_val      : 0.9170
-    T_val      : 20.6
+    P_val      : 0.916
+    T_val      : 21.1
+    H_val      : 1.3
 
 
 configuration_2026_lime_v1:
@@ -22,14 +24,15 @@ configuration_2026_lime_v1:
     encoder_n_layers     : 2
     encoder_dropout      : 0.1
     flow_n_layers        : 6
-    flow_hidden_dim      : 128
+    flow_hidden_dim      : 64
     flow_context_dim     : 32
     initial_lr           : 5.0e-4
-    batch_size           : 100
+    batch_size           : 500
     sigma_mmd            : 1.0
-    lambda_mom           : 0.05
-    lambda_var           : 0.5
+    lambda_mom           : 0.7
+    lambda_var           : 1
     lambda_logstd        : 1
     lambda_mean_anchor   : 0.05
-    sigma_latent         : 2
+    lambda_cov           : 1
+    sigma_latent         : 1
     standardize          : 1

@@ -1,0 +1,25 @@
+# Backup editor (Emacs, vim, ecc.)
+*~
+\#*\#
+.\#*
+
+# File swap/editor temporanei
+*.swp
+*.swo
+
+# File ROOT
+*.root
+
+# Build/output comuni
+build/
+bin/
+lib/
+data/
+plot/
+
+# Cache Python (se capita)
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
