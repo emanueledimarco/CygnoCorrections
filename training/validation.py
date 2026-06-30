@@ -148,6 +148,7 @@ def run_validation_sweep_from_dict(
     fig.suptitle(f"Variable {sweep_var} | Central SIM: z={z_val} cm, $\\alpha$={alpha_val}, $\lambda$={lambda_val} mm", fontsize=16)
     scalar_names = ['Integral (counts)', 'Length (pix)', 'Width (pix)']
     
+    bins = {}
     for row_idx, current_key in enumerate(chosen_keys):
         target_P = current_key[1]
         target_T = current_key[2]
@@ -174,21 +175,22 @@ def run_validation_sweep_from_dict(
             # Range dinamico
             all_vals = np.concatenate([sim_scalars[:, col_idx], pred_scalars[:, col_idx], real_scalars[:, col_idx]])
             vmin, vmax = np.percentile(all_vals, 1.0), np.percentile(all_vals, 99.0)
-            bins = np.linspace(vmin, vmax, 30)
+            if row_idx==0:
+                bins[col_idx] = np.linspace(vmin, vmax, 30)
             
             # A. SIM DI PARTENZA (Riempimento Blu semi-trasparente)
             if len(sim_scalars) > 0:
-                ax.hist(sim_scalars[:, col_idx], bins=bins, alpha=0.5, histtype="step", linewidth=2, density=True, label='Central SIM', color='tab:blue')
+                ax.hist(sim_scalars[:, col_idx], bins=bins[col_idx], alpha=0.5, histtype="step", linewidth=2, density=True, label='Central SIM', color='tab:blue')
                         
             # B. PRED TRASPORTATI (Riempimento Rosso/Arancio semi-trasparente)
             if len(pred_scalars) > 0:
-                ax.hist(pred_scalars[:, col_idx], bins=bins, alpha=0.7, histtype="step", linewidth=2, density=True, label='Corr. SIM', color='tab:orange')
+                ax.hist(pred_scalars[:, col_idx], bins=bins[col_idx], alpha=0.7, histtype="step", linewidth=2, density=True, label='Corr. SIM', color='tab:orange')
 
             # B. DATA TARGET REALE (Linea verde spessa, svuotato dentro per vedere lo sfondo)
             if len(real_scalars) > 0:
                 # Plot Dati con Errore
-                counts, bin_edges = np.histogram(real_scalars[:, col_idx], bins=bins)
-                counts_density, _ = np.histogram(real_scalars[:, col_idx], bins=bins, density=True)
+                counts, bin_edges = np.histogram(real_scalars[:, col_idx], bins=bins[col_idx])
+                counts_density, _ = np.histogram(real_scalars[:, col_idx], bins=bins[col_idx], density=True)
                 bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
             
                 # Calcolo errore poissoniano densità
