@@ -21,9 +21,10 @@ if __name__ == "__main__":
     parser.add_argument("--dscheck",action="store_true",help="do a sanity check of the conditioned dataset")   
     parser.add_argument("--integrity",action="store_true",help="use cached clusters dataset, and do integrity tests")
     parser.add_argument("--fwdtest",action="store_true",help="do the fwd test of the CYGNO transport model")
-    parser.add_argument("--train",action="store_true",help="train the correction")
+    parser.add_argument("--train",action="store_true",help="train the correction")    
     parser.add_argument("--test",action="store_true",help="train the correction")
     parser.add_argument("--validate",action="store_true",help="validate the correction by pure inference")
+    parser.add_argument("--checkpoint",type=str,help="give the path of a checkpoint.pt file containing a trained model (to start the training from a given point)")
     args = parser.parse_args()
 
     #loop to read over network condigurations from the yaml file: - one way to do hyperparameter optimization
@@ -47,7 +48,10 @@ if __name__ == "__main__":
     outputmodel = os.getcwd() + "/results/" + str(conf) + "/saved_states/best_model.pt"
     if args.train:
         print("\n\t === TRAIN THE MODEL ===")
-        model, history = train_model(inputfile,outputmodel)
+        startmodel=None
+        if args.checkpoint:
+            print(f"---> Starting the training from the pre-trained model saved in {args.checkpoint}")
+        model, history = train_model(inputfile,outputmodel,args.checkpoint)
         plot_training_history(history)
         print("\n\t === TEST THE MODEL ===")
         print(f"\nTest the trained model using the saved state in {outputmodel}")
@@ -87,7 +91,11 @@ if __name__ == "__main__":
         # -----------------------
         print(f"\nLoading model from:\n{outputmodel}")
         model = CygnoTransportModel().to(device)
-        model.load_state_dict(torch.load(outputmodel, map_location=device))
+        state = torch.load(outputmodel, map_location=device)
+        model_state = state['model_state_dict']
+        current_epoch = state['epoch']
+        model.load_state_dict(model_state)
+        print(f"===> Loaded the best model at epoch {current_epoch}.")
 
         unique_z = sorted(list(set([k[0] for k in metadata["keys"]["data_keys"]])))
         print(f"====> Will make data/MC comparison for these z values: {unique_z}")

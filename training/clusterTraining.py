@@ -293,9 +293,43 @@ def compute_physical_scalars_from_image(images, eps=1e-4):
     
     lengths = 2.0 * torch.sqrt(torch.clamp(lambda_max, min=0.0) + eps)
     widths = 2.0 * torch.sqrt(torch.clamp(lambda_min, min=0.0) + eps)
+
+    # 1. Densità Attiva (Fotoni medi per pixel "acceso")
+    noise_threshold = 0.2
+    area = torch.sum(imgs > noise_threshold, dim=[1, 2]).float() + eps
+    density = integrals_safe / area
+    
+    # 2. Eccentricità (da 0 per i cerchi a 1 per i segmenti lineari)
+    eccentricity_arg = torch.clamp(1.0 - (lambda_min / (lambda_max + eps)), min=0.0)
+    eccentricity = torch.sqrt(eccentricity_arg)
+    
+    # 3. Frazione di Picco (Quanto è concentrato il nucleo del cluster)
+    max_pixel = imgs.view(L_batch, -1).max(dim=1)[0]
+    relative_peak = max_pixel / integrals_safe
+    
+    # 4. Asimmetria Spaziale (Absolute Skewness lungo l'asse principale)
+    # A. Troviamo i componenti dell'autovettore principale (v_x, v_y)
+    v_x = lambda_max - mu_yy
+    v_y = mu_xy
+    
+    # Normalizzazione dell'autovettore
+    norm = torch.sqrt(v_x**2 + v_y**2 + eps)
+    v_x = (v_x / norm).view(L_batch, 1, 1)
+    v_y = (v_y / norm).view(L_batch, 1, 1)
+    
+    # B. Proiettiamo le coordinate dei pixel centrate su questo asse
+    u = x_centered * v_x + y_centered * v_y
+    
+    # C. Calcoliamo il 3° momento pesato sull'intensità
+    mu_3 = torch.sum(imgs * (u ** 3), dim=[1, 2]) / integrals_safe
+    
+    # D. Standardizziamo dividendo per sigma^3 e prendiamo il valore assoluto
+    sigma_3 = torch.clamp(lambda_max, min=0.0)**1.5 + eps
+    skewness = torch.abs(mu_3 / sigma_3)
     
     # Restituisce [L_batch, 3]
-    return torch.stack([integrals, lengths, widths], dim=1)
+    return torch.stack([integrals, lengths, widths,
+                        density, eccentricity, relative_peak, skewness], dim=1)
     
 
 def forward_test(inputfile):
@@ -360,22 +394,6 @@ def forward_test(inputfile):
         .mean()
     )
 
-
-
-# below training workflow
-# pickle
-#  ↓
-# ConditionalClusterDataset
-#  ↓
-# DataLoader
-#  ↓
-# model
-#  ↓
-# training loop
-#  ↓
-# checkpoint
-#  ↓
-# validation / visual test
 
 from torch.utils.data import DataLoader
 
@@ -468,6 +486,7 @@ def compute_mmd_rbf(X, Y):
     
     # 2. Kernel RBF Multi-Scala
     alphas = [0.01, 0.1, 1.0, 10.0, 100.0]
+    #alphas = [0.5, 2.0, 8.0, 32.0, 128.0]
     
     mmd_loss = 0.0
     for alpha in alphas:
@@ -741,8 +760,8 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
         sim_images_flat = sim_images.view(B * N, 1, H, W)
         data_images_flat = data_images.view(B * N, 1, H, W)
 
-        sim_scalars_phys_flat = compute_physical_scalars_from_image(sim_images_flat)
-        data_scalars_phys_flat = compute_physical_scalars_from_image(data_images_flat)
+        sim_scalars_phys_flat = compute_physical_scalars_from_image(sim_images_flat)[:, :3] # usa solo le primne 3 semplici
+        data_scalars_phys_flat = compute_physical_scalars_from_image(data_images_flat)[:, :3]
 
         # Ripristiniamo la shape originale ad eventi: [B, N, num_scal] dove num_scal = 3
         sim_scalars_phys = sim_scalars_phys_flat.view(B, N, -1)
@@ -788,7 +807,7 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
             pred_img = out["pred_images"]  # Immagine prodotta dal Flow [N, 1, H, W]
 
             # 2. CALCOLO IN DIRETTA DEGLI SCALARI DELLA PREDIZIONE (L'unico vero legame differenziabile)
-            pred_scalars_phys = compute_physical_scalars_from_image(pred_img) # [N, 3]
+            pred_scalars_phys = compute_physical_scalars_from_image(pred_img)[:, :3] # [N, 3]
 
             # Forward dell'identità per vincolare la stabilità del network
             out_identity = model(s_img, s_cond, s_cond, s_scal)
@@ -853,8 +872,8 @@ def get_loss_weights(epoch, total_epochs):
         
         "integral":     [50.0, 50.0],
         "transport":    [0.1, 0.2],        
-        "tv":           [0.05, 0.05],      
-        "lap":          [0.01, 0.01],      
+        "tv":           [0.0, 0.0],      
+        "lap":          [0.0, 0.0],
         "centroid":     [5.0, 5.0]         
     }
     
@@ -865,7 +884,7 @@ def get_loss_weights(epoch, total_epochs):
     }
     return current_weights
 
-def train_model(inputfile,outputfile,epochs=100):
+def train_model(inputfile, outputfile, checkpoint_path=None, epochs=100):
     
     device = (
         "cuda"
@@ -892,6 +911,20 @@ def train_model(inputfile,outputfile,epochs=100):
         lr=1e-4
     )
 
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"===> Loading checkpoint '{checkpoint_path}'...")
+    
+        # Carica su CPU o sulla GPU corrente
+        state_dict = torch.load(checkpoint_path, map_location=device)
+    
+        # Ripristina i pesi del modello
+        model.load_state_dict(state_dict)
+
+        print(f"===> Resuming successfully from {checkpoint_path}")
+    else:
+        print("===> Starting training from scratch (or checkpoint not found)")
+
+    
     train_history = {
         "loss": [],
         "mmd_shape_1d": [],
@@ -938,14 +971,20 @@ def train_model(inputfile,outputfile,epochs=100):
 
         if stats["loss"] < best_val_loss:
             best_val_loss = stats["loss"]
-            torch.save(model.state_dict(), f"{outputfile.replace('last','best')}")
+            torch.save({'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        },
+                       f"{outputfile.replace('last','best')}")
             print(f"Nuovo miglior modello salvato all'epoca {epoch} con loss = {stats['loss']}")
                 
-    torch.save(
-        model.state_dict(),
-        outputfile
-    )
-
+    torch.save({'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                },
+               outputfile
+               )
+    
     return (model,
             train_history)
 
@@ -1018,15 +1057,25 @@ def test_training(
             .to(device)
         )
 
+        # 1. Carica il file .pt generico
         state = torch.load(
             model_or_path,
             map_location=device
         )
 
-        model.load_state_dict(
-            state
-        )
+        # Controllo intelligente del formato
+        if isinstance(state, dict) and 'model_state_dict' in state:
+            model_state = state['model_state_dict']
+            current_epoch = state['epoch']
+            print(f"===> Rilevato checkpoint completo. Estraggo 'model_state_dict', all'epoca {current_epoch}")
+        else:
+            print("===> Rilevato state_dict puro (vecchio formato). Carico direttamente...")
+            model_state = state
 
+        model.load_state_dict(
+            model_state
+        )
+        
     else:
 
         model = model_or_path.to(
@@ -1057,7 +1106,7 @@ def test_training(
     sim_cond_flat = (sim_cond.repeat_interleave(N, dim=0))
     data_cond_flat = (data_cond.repeat_interleave(N, dim=0))
 
-    sim_scalars_flat = compute_physical_scalars_from_image(sim_flat)
+    sim_scalars_flat = compute_physical_scalars_from_image(sim_flat)[:, :3]
 
     with torch.no_grad():
         out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
@@ -1068,7 +1117,7 @@ def test_training(
     
     # 2. Ricostruisci la struttura a blocchi per gli scalari
     # Da [B*N, num_scalars] a [B, N, num_scalars]
-    pred_scalars = compute_physical_scalars_from_image(pred_images) # [N, 3]
+    pred_scalars = compute_physical_scalars_from_image(pred_images)[:, :3] # [N, 3]
     
     print("DEBUG TRA BATCH DIFFERENTI: ")
     # Confrontiamo l'evento 0 del batch 0 con l'evento 0 del batch 1
@@ -1087,9 +1136,6 @@ def test_training(
     # -----------------------
     # visual test
     # -----------------------
-    # -----------------------------------------------------------------
-    # NUOVO CODICE PER IL VISUAL TEST (Variazione tra condizioni diverse)
-    # -----------------------------------------------------------------
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
     
@@ -1120,7 +1166,7 @@ def test_training(
             
             B, N, H, W = sim.shape
             sim_flat = sim.view(B * N, 1, H, W)
-            sim_scalars_flat = torch.clamp(compute_physical_scalars_from_image(sim_flat), min=0.0).view(B, N, -1)
+            sim_scalars_flat = torch.clamp(compute_physical_scalars_from_image(sim_flat)[:, :3], min=0.0).view(B, N, -1)
             
             # Espandiamo le condizioni per il match flat
             sim_cond_flat = sim_cond.repeat_interleave(N, dim=0)
@@ -1134,15 +1180,15 @@ def test_training(
             # 3. Reshape finale a 4D delle immagini post-soglia
             pred_images = pred_clamped_flat.view(B, N, H, W)
 
-            pred_scalars = torch.clamp(compute_physical_scalars_from_image(pred_images), min=0.0).view(B, N, -1)
+            pred_scalars = torch.clamp(compute_physical_scalars_from_image(pred_images)[:, :3], min=0.0).view(B, N, -1)
             
             # Scegliamo il primo sotto-cluster (idx=0) di questo specifico batch
             test_sims.append(sim[0, 0].cpu())
             test_preds.append(pred_images[0, 0].cpu())
             test_datas.append(batch["data_images"][0, 0].cpu())
 
-    # Ora disegnamo le 10 righe, ognuna corrispondente a un BATCH differente
-    fig, ax = plt.subplots(10, 3, figsize=(9, 20))
+    # Ora disegnamo le 10 colonne, ognuna corrispondente a un BATCH differente
+    fig, ax = plt.subplots(nrows=3, ncols=10, figsize=(20, 9))
     
     for i in range(10):
 
@@ -1157,18 +1203,18 @@ def test_training(
         # Se preferisci vedere le shape normalizzate alla loro intensità usa il vmax locale,
         # ma per vedere la scala z reale usiamo questo vmax unico per la riga:
         
-        ax[i,0].imshow(test_sims[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
-        ax[i,0].set_title(f"SIM (Batch {i})") if i==0 else None
+        ax[0,i].imshow(test_sims[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
+        ax[0,i].set_title(f"SIM (Batch {i})") if i==0 else None
         
-        ax[i,1].imshow(test_preds[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
-        ax[i,1].set_title(f"CORRECTED (Batch {i})") if i==0 else None
+        ax[1,i].imshow(test_preds[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
+        ax[1,i].set_title(f"CORRECTED (Batch {i})") if i==0 else None
         
         # Nota: se i DATI reali hanno un guadagno intrinseco totalmente diverso, 
         # conviene lasciargli il suo vmax per studiare la shape, altrimenti mettiamo vmax anche qui
-        im_data = ax[i,2].imshow(test_datas[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
-        ax[i,2].set_title(f"DATA (Batch {i})") if i==0 else None
+        im_data = ax[2,i].imshow(test_datas[i], origin="lower", vmin=0, vmax=vmax, cmap=cmap)
+        ax[2,i].set_title(f"DATA (Batch {i})") if i==0 else None
 
-        cbar = fig.colorbar(im_data, ax=ax[i, 2], fraction=0.046, pad=0.05)
+        cbar = fig.colorbar(im_data, ax=ax[2,i], fraction=0.046, pad=0.05)
         cbar.ax.tick_params(labelsize=8)
         if i == 0:
             cbar.set_label("Counts", fontsize=8)
@@ -1222,8 +1268,8 @@ def run_sampled_and_detailed_test(
             sim_cond = batch["sim_cond"].to(device)
             data_cond = batch["data_cond"].to(device)
             
-            sim_scalars_raw = compute_physical_scalars_from_image(sim_images_flat)
-            data_scalars_raw = compute_physical_scalars_from_image(data_images_flat)
+            sim_scalars_raw = compute_physical_scalars_from_image(sim_images_flat)[:, :3]
+            data_scalars_raw = compute_physical_scalars_from_image(data_images_flat)[:, :3]
 
             for b in range(B):
                 s_img = sim_images[b].unsqueeze(1)
@@ -1236,7 +1282,7 @@ def run_sampled_and_detailed_test(
                 d_scal = data_scalars_raw[b * N : (b + 1) * N]
 
                 out = model(s_img, s_c, d_c, s_scal)
-                pred_scalars_clamped = torch.clamp(compute_physical_scalars_from_image(out["pred_images"]), min=0.0)
+                pred_scalars_clamped = torch.clamp(compute_physical_scalars_from_image(out["pred_images"])[:, :3], min=0.0)
 
                 all_sim_scalars.append(s_scal)
                 all_pred_scalars.append(pred_scalars_clamped)
