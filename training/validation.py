@@ -57,7 +57,6 @@ def run_validation_sweep_from_dict(
     # 2. Accumulo Dati e Inferenza
     # -----------------------
     for ib, batch in enumerate(loader):
-        if ib>10: break
         print(f"\tProcessing cluster batch # {ib}...")
         
         sim_images = batch["sim_images"].to(device)   
