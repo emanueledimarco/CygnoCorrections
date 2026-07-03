@@ -9,6 +9,8 @@ from collections import defaultdict
 from data_reading.clusterDataset import ConditionalClusterDataset
 from data_reading.read_data_2D import make_cygno_collate_fn
 
+noise_threshold = 0.05
+
 class ConditionEncoder(nn.Module):
     def __init__(self, emb_dim=64):
         super().__init__()
@@ -113,27 +115,36 @@ class FiLMMaskedDecoder(nn.Module):
         # partiamo da 128 * 4 = 512 canali convoluzionali.
         self.conv1 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
         self.ps1 = nn.PixelShuffle(upscale_factor=2) # -> 128 canali, 8x8
-        self.noise1 = SpatialNoiseInjection(128)
+        self.noise1 = SpatialNoiseInjection(128, noise_intensity=0.0)
         self.film1 = FiLMBlob(cond_total_dim, 128)
         self.res1 = ResNetBlock(128)
         
         # Blocco 2: da 8x8 a 16x16
         self.conv2 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
         self.ps2 = nn.PixelShuffle(upscale_factor=2) # -> 64 canali, 16x16
-        self.noise2 = SpatialNoiseInjection(64)
+        self.noise2 = SpatialNoiseInjection(64, noise_intensity=0.0)
         self.film2 = FiLMBlob(cond_total_dim, 64)
         self.res2 = ResNetBlock(64)
         
         # Blocco 3: da 16x16 a 32x32
         self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.ps3 = nn.PixelShuffle(upscale_factor=2) # -> 32 canali, 32x32
-        self.noise3 = SpatialNoiseInjection(32)
+        self.noise3 = SpatialNoiseInjection(32, noise_intensity=0.02)
         self.film3 = FiLMBlob(cond_total_dim, 32)
         self.res3 = ResNetBlock(32)
+
+        # Blocco 4: Portiamo lo spazio a 64x64 mantenendo però 32 canali attivi
+        # Per farlo, la conv deve sputare 32 * 4 = 128 canali prima del PixelShuffle
+        self.conv4 = nn.Conv2d(32, 128, kernel_size=3, padding=1)
+        self.ps4 = nn.PixelShuffle(upscale_factor=2) # -> Esce a 32 canali, 64x64
         
+        # PROVVEDIMENTO ANTI-SCACCHIERA: Convoluzione finale sullo spazio reale 64x64
+        # Questo layer mescola i pixel intersecati dal PixelShuffle e uccide il pattern a griglia
+        self.final_conv = nn.Conv2d(32, 1, kernel_size=3, padding=1)
+
         # Blocco 4: da 32x32 a 64x64 (canale singolo di output)
-        self.conv4 = nn.Conv2d(32, 4, kernel_size=3, padding=1)
-        self.ps4 = nn.PixelShuffle(upscale_factor=2) # -> 1 canale, 64x64
+        #self.conv4 = nn.Conv2d(32, 4, kernel_size=3, padding=1)
+        #self.ps4 = nn.PixelShuffle(upscale_factor=2) # -> 1 canale, 64x64
 
     def forward(self, h, cond):
         x = self.fc(h).view(-1, 256, 4, 4)
@@ -152,8 +163,9 @@ class FiLMMaskedDecoder(nn.Module):
         x = self.noise3(x)
         x = self.film3(x, cond)
         x = self.res3(x)
-        
-        return self.ps4(self.conv4(x))
+
+        x = self.ps4(self.conv4(x))      # Ora x è [B*N, 32, 64, 64]
+        return self.final_conv(x)        # Ora x è [B*N, 1, 64, 64] ed è spazialmente coerente
 
 class CygnoTransportModel(nn.Module):
     def __init__(self, latent_dim=128, cond_dim=64, noise_scale=0.05):
@@ -215,40 +227,49 @@ class DifferentialTransport(nn.Module):
         x = torch.cat([h, cond_total], dim=-1)
         raw_delta = self.net(x)
         return self.gamma * raw_delta
-    
-def compute_physical_scalars_from_image(images, eps=1e-4):
+
+def compute_physical_scalars_from_image(images, eps=1e-4, noise_threshold=noise_threshold):
     device = images.device
     H, W = images.shape[-2], images.shape[-1]
     imgs = images.view(-1, H, W) 
     L_batch = imgs.shape[0]      
     
+    # Griglia di coordinate fisse rispetto al centro dell'immagine
     y_indices, x_indices = torch.meshgrid(
         torch.arange(H, dtype=torch.float32, device=device) - H // 2,
         torch.arange(W, dtype=torch.float32, device=device) - W // 2,
         indexing="ij"
     )
     
-    x_coords = x_indices.unsqueeze(0) 
-    y_coords = y_indices.unsqueeze(0) 
+    x_coords = x_indices.unsqueeze(0)  # Shape: [1, H, W]
+    y_coords = y_indices.unsqueeze(0)  # Shape: [1, H, W]
     imgs = torch.clamp(imgs, min=0.0)
     
-    # --- A. INTEGRALE ---
+    # --- A. INTEGRALE TOTALE (Grezzo, preserva la carica totale per lo spettro) ---
     integrals = torch.sum(imgs, dim=[1, 2]) 
     integrals_safe = torch.where(integrals > eps, integrals, torch.tensor(eps, device=device))
     
-    # --- B. CENTROIDI ---
-    x_c = torch.sum(imgs * x_coords, dim=[1, 2]) / integrals_safe 
-    y_c = torch.sum(imgs * y_coords, dim=[1, 2]) / integrals_safe 
+    # --- FILTRAGGIO DEL CORE TRAMITE SOFT-THRESHOLD ---
+    # La sigmoide azzera l'alone mantenendo i gradienti attivi sui bordi del core
+    soft_mask = torch.sigmoid((imgs - noise_threshold) * 50.0)
+    imgs_core = imgs * soft_mask
+    
+    integrals_core = torch.sum(imgs_core, dim=[1, 2])
+    integrals_core_safe = torch.where(integrals_core > eps, integrals_core, torch.tensor(eps, device=device))
+    
+    # --- B. CENTROIDI (Calcolati sul Core) ---
+    x_c = torch.sum(imgs_core * x_coords, dim=[1, 2]) / integrals_core_safe 
+    y_c = torch.sum(imgs_core * y_coords, dim=[1, 2]) / integrals_core_safe 
     
     x_c_grid = x_c.view(L_batch, 1, 1)
     y_c_grid = y_c.view(L_batch, 1, 1)
     x_centered = x_coords - x_c_grid
     y_centered = y_coords - y_c_grid
     
-    # --- C. MOMENTI SECONDI ---
-    mu_xx = torch.sum(imgs * (x_centered ** 2), dim=[1, 2]) / integrals_safe
-    mu_yy = torch.sum(imgs * (y_centered ** 2), dim=[1, 2]) / integrals_safe
-    mu_xy = torch.sum(imgs * (x_centered * y_centered), dim=[1, 2]) / integrals_safe
+    # --- C. MOMENTI SECONDI DEL CORE (L'alone è soppresso, niente braccio di leva artificiale) ---
+    mu_xx = torch.sum(imgs_core * (x_centered ** 2), dim=[1, 2]) / integrals_core_safe
+    mu_yy = torch.sum(imgs_core * (y_centered ** 2), dim=[1, 2]) / integrals_core_safe
+    mu_xy = torch.sum(imgs_core * (x_centered * y_centered), dim=[1, 2]) / integrals_core_safe
     
     # --- D. AUTOVALORI PROTETTI ---
     trace = mu_xx + mu_yy
@@ -260,19 +281,23 @@ def compute_physical_scalars_from_image(images, eps=1e-4):
     lambda_max = (trace + discriminant) / 2.0
     lambda_min = (trace - discriminant) / 2.0
     
+    # Lunghezze e larghezze stabili del profilo del core (2 * sigma)
     lengths = 2.0 * torch.sqrt(torch.clamp(lambda_max, min=0.0) + eps)
     widths = 2.0 * torch.sqrt(torch.clamp(lambda_min, min=0.0) + eps)
 
-    # --- E. 4 NUOVE METRICHE ESTESE ---
-    area = torch.sum(imgs > 0.0, dim=[1, 2]).float() + eps
-    density = integrals_safe / area
+    # --- E. LE ALTRE METRICHE AGGIORNATE ---
+    # Area differenziabile tramite il soft counting della sigmoide
+    soft_area = torch.sum(soft_mask, dim=[1, 2]) + eps
+    density = integrals_core_safe / soft_area
     
+    # L'eccentricità eredita la stabilità dei nuovi autovalori del core
     eccentricity_arg = torch.clamp(1.0 - (lambda_min / (lambda_max + eps)), min=0.0)
     eccentricity = torch.sqrt(eccentricity_arg)
     
     max_pixel = imgs.view(L_batch, -1).max(dim=1)[0]
     relative_peak = max_pixel / integrals_safe
     
+    # Skewness ricalcolata sul profilo del core lungo l'asse maggiore
     v_x = lambda_max - mu_yy
     v_y = mu_xy
     norm = torch.sqrt(v_x**2 + v_y**2 + eps)
@@ -280,12 +305,11 @@ def compute_physical_scalars_from_image(images, eps=1e-4):
     v_y = (v_y / norm).view(L_batch, 1, 1)
     
     u = x_centered * v_x + y_centered * v_y
-    mu_3 = torch.sum(imgs * (u ** 3), dim=[1, 2]) / integrals_safe
+    mu_3 = torch.sum(imgs_core * (u ** 3), dim=[1, 2]) / integrals_core_safe
     sigma_3 = torch.clamp(lambda_max, min=0.0)**1.5 + eps
     skewness = torch.abs(mu_3 / sigma_3)
     
     return torch.stack([integrals, lengths, widths, density, eccentricity, relative_peak, skewness], dim=1)
-
 
 def compute_centroids(images, eps=1e-4):
     device = images.device
@@ -358,18 +382,24 @@ def compute_mmd_rbf(X, Y):
 def extract_profiles_with_diagonals(img_tensor):
     B, C, H, W = img_tensor.shape
     img = img_tensor.view(B, H, W)
-    prof_x = img.sum(dim=1) 
-    prof_y = img.sum(dim=2) 
+    
+    # Profili X e Y standardizzati (divisi per la lunghezza H o W per coerenza)
+    prof_x = img.mean(dim=1) 
+    prof_y = img.mean(dim=2) 
     
     diags_1, diags_2 = [], []
     img_flipped = torch.flip(img, dims=[2])
+    
     for offset in range(-H + 1, W):
-        diags_1.append(torch.diagonal(img, offset=offset, dim1=1, dim2=2).sum(dim=1))
-        diags_2.append(torch.diagonal(img_flipped, offset=offset, dim1=1, dim2=2).sum(dim=1))
+        # Usiamo .mean(dim=1) invece di .sum(dim=1) per evitare che 
+        # le diagonali corte contino geometricamente meno a prescindere dal contenuto
+        diags_1.append(torch.diagonal(img, offset=offset, dim1=1, dim2=2).mean(dim=1))
+        diags_2.append(torch.diagonal(img_flipped, offset=offset, dim1=1, dim2=2).mean(dim=1))
         
     return torch.cat([prof_x, prof_y, torch.stack(diags_1, dim=1), torch.stack(diags_2, dim=1)], dim=1)
 
 def compute_radial_profile(img, bins=20):
+    # img ha shape [B, C, H, W] oppure [B, H, W]
     h, w = img.shape[-2:]
     center_y, center_x = h // 2, w // 2
     y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
@@ -380,73 +410,118 @@ def compute_radial_profile(img, bins=20):
     profile = []
     for i in range(bins):
         mask = (dist >= bin_edges[i]) & (dist < bin_edges[i+1])
-        profile.append((img * mask).sum() / (mask.sum() + 1e-6))
-    return torch.stack(profile)
+        # Somma solo sulle coordinate spaziali (H, W)
+        numerator = (img * mask).sum(dim=(-2, -1)) 
+        denominator = mask.sum() + 1e-6
+        profile.append(numerator / denominator)
+        
+    # Stack lungo l'ultima dimensione per ottenere [B, bins] o [B, C, bins]
+    return torch.stack(profile, dim=-1)
 
 def compute_radius_of_gyration(img):
-    total_mass = img.sum(dim=(-2, -1))
-    h, w = img.shape[-2:]
-    y, x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing='ij')
-    y = y.to(img.device); x = x.to(img.device)
-    yc = (y * img).sum(dim=(-2, -1)) / (total_mass + 1e-6)
-    xc = (x * img).sum(dim=(-2, -1)) / (total_mass + 1e-6)
-    r2 = ((x - xc.view(-1,1,1))**2 + (y - yc.view(-1,1,1))**2) * img
-    return torch.sqrt(r2.sum(dim=(-2, -1)) / (total_mass + 1e-6))
+    # Se l'immagine ha il canale [B, 1, H, W], lo rimuoviamo per semplicità -> [B, H, W]
+    if img.ndim == 4:
+        img = img.squeeze(1)
+        
+    B, H, W = img.shape
+    device = img.device
+    
+    # 1. Creazione delle griglie di coordinate spaziali [H, W]
+    y_grid, x_grid = torch.meshgrid(
+        torch.arange(H, device=device, dtype=torch.float32),
+        torch.arange(W, device=device, dtype=torch.float32),
+        indexing='ij'
+    )
+    
+    # 2. Espansione a [1, H, W] per il broadcasting corretto lungo il batch
+    y_grid = y_grid.unsqueeze(0)
+    x_grid = x_grid.unsqueeze(0)
+    
+    # Somma dell'intensità del cluster (massa) -> shape [B, 1, 1]
+    # (Se usi pred_n o data_n è già normalizzata a 1, ma questo ci rende sicuri al 100%)
+    total_mass = img.sum(dim=(1, 2), keepdim=True) + 1e-8
+    
+    # 3. Calcolo dei baricentri (Centroids) di ogni singolo cluster -> shape [B, 1, 1]
+    y_cm = (img * y_grid).sum(dim=(1, 2), keepdim=True) / total_mass
+    x_cm = (img * x_grid).sum(dim=(1, 2), keepdim=True) / total_mass
+    
+    # 4. Calcolo della varianza spaziale (Raggio di girazione al quadrato) -> shape [B, 1, 1]
+    rg2 = (img * ((y_grid - y_cm)**2 + (x_grid - x_cm)**2)).sum(dim=(1, 2), keepdim=True) / total_mass
+    
+    # 5. Estrazione della radice e squeeze definitivo delle dimensioni flat -> shape [B]
+    return torch.sqrt(rg2).squeeze(-1).squeeze(-1)
 
-
-# === COMPUTE LOSS (TV E LAPLACIAN RIMOSSI) ===
+# === COMPUTE LOSS ===
 def compute_cygno_loss(
     pred, pred_scalars, target_scalars, delta_h, loss_weights, 
-    pred_identity=None, sim_images=None
+    pred_identity=None, sim_images=None, data_images=None
 ):
-    data_clamped = torch.clamp(target_scalars, min=0.0) # Fallback / Safety
-    pred_clamped = F.elu(pred) + 1.0
+    # 1. CLAMPING REALE DELLE IMMAGINI (Rimozione fluttuazioni negative di background)
+    pred_clamped = F.relu(pred)
+    sim_clamped  = F.relu(sim_images) if sim_images is not None else None
+    data_clamped = F.relu(data_images) # <--- ORA È L'IMMAGINE REALE CMOS CLAMPATA!
+
+    # Sicurezza per i target scalars (es. lunghezze/width)
+    target_scalars_clamped = torch.clamp(target_scalars, min=0.0)
 
     L_identity = 0.0
     if pred_identity is not None and sim_images is not None:
-        L_identity = F.mse_loss(F.elu(pred_identity) + 1.0, sim_images)
+        L_identity = F.mse_loss(pred_clamped, sim_images)
 
+    # 2. NORMALIZZAZIONE GEOMETRICA (Solo su matrici positive >= 0)
     pred_n = pred_clamped / (pred_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
-    sim_n  = sim_images / (sim_images.sum(dim=(-1, -2), keepdim=True) + 1e-8)
+    sim_n  = sim_images / (sim_images.sum(dim=(-1, -2), keepdim=True) + 1e-8) 
+    data_n = data_clamped / (data_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8) # <--- CORRETTO
+
+    # --- PROFILI GEOMETRICI (Tutti convertiti in MMD perché i dati sono UNPAIRED) ---
+    L_mmd_shape_1d = compute_mmd_rbf(extract_profiles_with_diagonals(pred_n), extract_profiles_with_diagonals(data_n))
     
-    # Profilo 1D e Radiale
-    # Passiamo da MSE a L1 per evitare la regressione verso la media (effetto smooth)
-    L_mmd_shape_1d = compute_mmd_rbf(extract_profiles_with_diagonals(pred_n), extract_profiles_with_diagonals(sim_n))
-    L_mmd_radial = F.smooth_l1_loss(compute_radial_profile(pred_n), compute_radial_profile(sim_n), beta=0.05)
-    L_rg = F.l1_loss(compute_radius_of_gyration(pred_n), compute_radius_of_gyration(sim_n))   # <--- Cambiato in L1
+    # FIX: Anche il profilo radiale ora usa la MMD anziché la smooth_l1_loss
+    L_mmd_radial   = compute_mmd_rbf(compute_radial_profile(pred_n), compute_radial_profile(data_n))       
     
-    # Shape Anchor
+    # Calcolo dei raggi di girazione unpaired da inserire nella MMD fisica
+    rg_pred = compute_radius_of_gyration(pred_n)
+    rg_data = compute_radius_of_gyration(data_n)
+    
+    # L'ancora sulla SIM usa tensori puliti ed è l'unica accoppiata pixel-by-pixel
     loss_pixel_matrix = F.smooth_l1_loss(pred_n, sim_n, beta=0.01, reduction='none')
     weight_mask = (sim_n / (sim_n.mean(dim=(-1, -2), keepdim=True) + 1e-8)).detach()
     L_pixel_shape_anchor = (loss_pixel_matrix * weight_mask).mean()
     
-    # --- VALIDAZIONE ED ALLINEAMENTO COMPLETO DELLE 7 METRICHE FISICHE ---
+    # --- FISICA: SOGLIE SOFT E STRUTTURA DELLE FEATURE DISACCOPPIATE ---
+    
+    # 3. FIX: La maschera soft lavora finalmente sui pixel dell'immagine reale
+    soft_mask_pred   = torch.sigmoid((pred_clamped - noise_threshold) * 50.0)
+    soft_mask_target = torch.sigmoid((data_clamped - noise_threshold) * 50.0) # <--- CORRETTO
+
+    pred_npix   = torch.sum(soft_mask_pred, dim=[1, 2, 3])
+    target_npix = torch.sum(soft_mask_target, dim=[1, 2, 3])
+
+    # 4. Costruzione del tensore delle feature (Espanso a 6 Dimensioni includendo il raggio)
     pred_physics_feat = torch.stack([
-        torch.log10(pred_scalars[:, 0] + 1.0),   # Integral
-        pred_scalars[:, 1] / 10.0,               # Length
-        pred_scalars[:, 2] / 10.0,               # Width
-        pred_scalars[:, 3] / 5.0,                # Density
-        pred_scalars[:, 4],                      # Eccentricity (già 0-1)
-        pred_scalars[:, 5] * 10.0,               # Relative Peak
-        pred_scalars[:, 6]                       # Skewness
+        torch.log10(pred_scalars[:, 0] + 1.0),   # 0. Log-Integral
+        pred_scalars[:, 1] / 10.0,               # 1. Length
+        pred_scalars[:, 2] / 10.0,               # 2. Width
+        pred_npix / 100.0,                       # 3. Soft N_pix
+        pred_scalars[:, 5] * 10.0,               # 4. Relative Peak
+        rg_pred / 10.0                           # 5. Raggio di girazione (Unpaired geometrico)
     ], dim=1)
 
     target_physics_feat = torch.stack([
-        torch.log10(target_scalars[:, 0] + 1.0),
-        target_scalars[:, 1] / 10.0,
-        target_scalars[:, 2] / 10.0,
-        target_scalars[:, 3] / 5.0,
-        target_scalars[:, 4],
-        target_scalars[:, 5] * 10.0,
-        target_scalars[:, 6]
+        torch.log10(target_scalars_clamped[:, 0] + 1.0),
+        target_scalars_clamped[:, 1] / 10.0,
+        target_scalars_clamped[:, 2] / 10.0,
+        target_npix / 100.0,
+        target_scalars_clamped[:, 5] * 10.0,
+        rg_data / 10.0                           # <--- Inserito qui coerentemente
     ], dim=1)
-        
+            
     L_mmd_physics = compute_mmd_rbf(pred_physics_feat, target_physics_feat)
-    L_integral = F.mse_loss(pred_physics_feat[:, 0].mean(), target_physics_feat[:, 0].mean())
-    L_transport = (delta_h.pow(2)).mean()
-    L_centroid = compute_centroid_loss(sim_images, pred)
+    L_integral    = F.mse_loss(pred_physics_feat[:, 0].mean(), target_physics_feat[:, 0].mean())
+    L_transport   = (delta_h.pow(2)).mean()
+    L_centroid    = compute_centroid_loss(sim_images, pred_clamped)
 
-    # Combinazione pesata senza computazione TV/Laplace inutile
+    # Combinazione lineare finale
     loss = (
         loss_weights["mmd_shape_1d"] * L_mmd_shape_1d +
         loss_weights["shape_anchor"] * L_pixel_shape_anchor +
@@ -508,16 +583,17 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
 
             out = model(s_img, s_cond, d_cond, s_scal)
             pred_img = out["pred_images"]
-            pred_scalars_phys = compute_physical_scalars_from_image(pred_img)
+            pred_img_clamped = F.relu(pred_img)
+            pred_scalars_phys = compute_physical_scalars_from_image(pred_img_clamped)
 
             out_identity = model(s_img, s_cond, s_cond, s_scal)
             
             loss_evento, info_evento = compute_cygno_loss(
-                pred=pred_img, pred_scalars=pred_scalars_phys, target_scalars=d_scal,
+                pred=pred_img, pred_scalars=pred_scalars_phys, target_scalars=d_scal, #nota: non pred_img_clamped perche' lo fa gia' nella loss
                 delta_h=out["delta_h"], pred_identity=out_identity["pred_images"],
-                sim_images=s_img, loss_weights=loss_weights
+                sim_images=s_img, data_images=d_img, loss_weights=loss_weights
             )
-
+            
             loss_batch_accumulata += loss_evento / B
             for k, v in info_evento.items():
                 info_batch_accumulato[k] += v / B
@@ -532,16 +608,22 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
     return {k: np.mean(v) for k, v in epoch_stats.items()}
 
 def get_loss_weights(epoch, total_epochs):
-    # Ricalibrazione numerica basata sui valori reali dell'epoca 0
     weights_schedule = {
-        "mmd_shape_1d": [300.0, 300.0],     # Ok (~600)
-        "shape_anchor": [1500.0, 800.0],    # ALZATA: da 50.0 a 1500.0 per forzare l'inclinazione XY
-        "mmd_physics":  [80.0, 100.0],       # ABBASSATA: da 4000.0 a 80.0 per togliere la dominanza
-        "integral":     [2000.0, 1000.0],    # Bilanciata (~1000)
-        "transport":    [0.5, 0.5],          # Lascia respirare il flusso latente
-        "centroid":     [10.0, 10.0],        # Ok (~100)
-        "radial":       [100000.0, 50000.0], # ALZATA TRADIZIONALMENTE: Huber loss sui profili ha bisogno di una scala enorme
+        # Riportiamo le loss geometriche a O(100) nei valori pesati
+        "mmd_shape_1d": [15000.0, 10000.0],  # Alza drasticamente (lavora sulle medie delle diagonali)
+        "radial":       [15000.0, 10000.0],  # Riporta su: la media radiale ha valori piccoli, serve un peso forte!
+        
+        # Consistenza con la SIM pixel-by-pixel
+        "shape_anchor": [4000.0, 1000.0],   # Lascialo deciso all'inizio per dare stabilità geometrica
+        "centroid":     [10.0, 10.0],
+        
+        # Calibriamo la fisica per farla partire a O(50) invece che a 500
+        "mmd_physics":  [5.0, 50.0],        # Abbassato il punto di partenza per non monopolizzare l'inizio del training
+        "integral":     [1500.0, 1500.0],   
+        
+        "transport":    [0.5, 0.5],        
     }
+    
     alpha = min(epoch / total_epochs, 1.0)
     return {k: (v[0] + (v[1] - v[0]) * alpha) for k, v in weights_schedule.items()}
 
@@ -703,7 +785,7 @@ def train_model(inputfile, outputfile, checkpoint_path=None, epochs=50):
             optimizer,
             gammas,
             device=device,
-            max_batches=30
+            max_batches=100
         )
 
         for k in train_history:
@@ -861,7 +943,8 @@ def test_training(
         out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
 
     # 1. Ricostruisci la struttura a blocchi per le immagini
-    pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
+    #pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
+    pred_clamped_flat = F.relu(out["pred_images"])
     pred_images = pred_clamped_flat.view(B, N, H, W)
     
     # 2. Ricostruisci la struttura a blocchi per gli scalari
@@ -926,9 +1009,9 @@ def test_training(
 
             # Forward
             out = model(sim_flat, sim_cond_flat, data_cond_flat, sim_scalars_flat)
-            pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
-            threshold_value = 0. 
-            pred_clamped_flat = torch.where(pred_clamped_flat > threshold_value, pred_clamped_flat, torch.zeros_like(pred_clamped_flat))
+            #pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
+            pred_clamped_flat = F.relu(out["pred_images"])
+            pred_clamped_flat = torch.where(pred_clamped_flat > noise_threshold, pred_clamped_flat, torch.zeros_like(pred_clamped_flat))
             # 3. Reshape finale a 4D delle immagini post-soglia
             pred_images = pred_clamped_flat.view(B, N, H, W)
 
@@ -1051,7 +1134,8 @@ def run_sampled_and_detailed_test(
                 d_scal = data_scalars_raw[b * N : (b + 1) * N]
 
                 out = model(s_img, s_c, d_c, s_scal)
-                pred_scalars_clamped = torch.clamp(compute_physical_scalars_from_image(out["pred_images"]), min=0.0)
+                pred_img_clamped = F.relu(out["pred_images"])
+                pred_scalars_clamped = compute_physical_scalars_from_image(pred_img_clamped)
 
                 all_sim_scalars.append(s_scal)
                 all_pred_scalars.append(pred_scalars_clamped)
