@@ -292,7 +292,7 @@ def compute_physical_scalars_from_image(images, eps=1e-4, noise_threshold=noise_
     
     # L'eccentricità eredita la stabilità dei nuovi autovalori del core
     eccentricity_arg = torch.clamp(1.0 - (lambda_min / (lambda_max + eps)), min=0.0)
-    eccentricity = torch.sqrt(eccentricity_arg)
+    eccentricity = torch.sqrt(eccentricity_arg + eps)
     
     max_pixel = imgs.view(L_batch, -1).max(dim=1)[0]
     relative_peak = max_pixel / integrals_safe
@@ -309,7 +309,7 @@ def compute_physical_scalars_from_image(images, eps=1e-4, noise_threshold=noise_
     sigma_3 = torch.clamp(lambda_max, min=0.0)**1.5 + eps
     skewness = torch.abs(mu_3 / sigma_3)
     
-    return torch.stack([integrals, lengths, widths, density, eccentricity, relative_peak, skewness], dim=1)
+    return torch.stack([integrals, lengths, widths, soft_area, eccentricity, relative_peak, density, skewness], dim=1)
 
 def compute_centroids(images, eps=1e-4):
     device = images.device
@@ -453,73 +453,64 @@ def compute_radius_of_gyration(img):
 
 # === COMPUTE LOSS ===
 def compute_cygno_loss(
-    pred, pred_scalars, target_scalars, delta_h, loss_weights, 
+    pred, delta_h, loss_weights, 
     pred_identity=None, sim_images=None, data_images=None
 ):
-    # 1. CLAMPING REALE DELLE IMMAGINI (Rimozione fluttuazioni negative di background)
+    # 1. CLAMPING REALE DELLE IMMAGINI
     pred_clamped = F.relu(pred)
-    sim_clamped  = F.relu(sim_images) if sim_images is not None else None
-    data_clamped = F.relu(data_images) # <--- ORA È L'IMMAGINE REALE CMOS CLAMPATA!
+    data_clamped = F.relu(data_images)
 
-    # Sicurezza per i target scalars (es. lunghezze/width)
-    target_scalars_clamped = torch.clamp(target_scalars, min=0.0)
+    # 2. ESTRAZIONE ONLINE SIMMETRICA (Evita il disallineamento offline/online)
+    pred_scalars   = compute_physical_scalars_from_image(pred_clamped)
+    target_scalars = compute_physical_scalars_from_image(data_clamped)
 
-    L_identity = 0.0
-    if pred_identity is not None and sim_images is not None:
-        L_identity = F.mse_loss(pred_clamped, sim_images)
-
-    # 2. NORMALIZZAZIONE GEOMETRICA (Solo su matrici positive >= 0)
+    # 3. NORMALIZZAZIONE GEOMETRICA PER LE LOSS DI SHAPE 2D
     pred_n = pred_clamped / (pred_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
-    sim_n  = sim_images / (sim_images.sum(dim=(-1, -2), keepdim=True) + 1e-8) 
-    data_n = data_clamped / (data_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8) # <--- CORRETTO
+    sim_n  = sim_images / (sim_images.sum(dim=(-1, -2), keepdim=True) + 1e-8) if sim_images is not None else None
+    data_n = data_clamped / (data_clamped.sum(dim=(-1, -2), keepdim=True) + 1e-8)
 
-    # --- PROFILI GEOMETRICI (Tutti convertiti in MMD perché i dati sono UNPAIRED) ---
+    # --- PROFILI GEOMETRICI MMD ---
     L_mmd_shape_1d = compute_mmd_rbf(extract_profiles_with_diagonals(pred_n), extract_profiles_with_diagonals(data_n))
-    
-    # FIX: Anche il profilo radiale ora usa la MMD anziché la smooth_l1_loss
     L_mmd_radial   = compute_mmd_rbf(compute_radial_profile(pred_n), compute_radial_profile(data_n))       
     
-    # Calcolo dei raggi di girazione unpaired da inserire nella MMD fisica
     rg_pred = compute_radius_of_gyration(pred_n)
     rg_data = compute_radius_of_gyration(data_n)
     
-    # L'ancora sulla SIM usa tensori puliti ed è l'unica accoppiata pixel-by-pixel
-    loss_pixel_matrix = F.smooth_l1_loss(pred_n, sim_n, beta=0.01, reduction='none')
-    weight_mask = (sim_n / (sim_n.mean(dim=(-1, -2), keepdim=True) + 1e-8)).detach()
-    L_pixel_shape_anchor = (loss_pixel_matrix * weight_mask).mean()
+    # Ancora pixel-by-pixel sulla simulazione pulita
+    L_pixel_shape_anchor = 0.0
+    if sim_n is not None:
+        loss_pixel_matrix = F.smooth_l1_loss(pred_n, sim_n, beta=0.01, reduction='none')
+        weight_mask = (sim_n / (sim_n.mean(dim=(-1, -2), keepdim=True) + 1e-8)).detach()
+        L_pixel_shape_anchor = (loss_pixel_matrix * weight_mask).mean()
     
-    # --- FISICA: SOGLIE SOFT E STRUTTURA DELLE FEATURE DISACCOPPIATE ---
-    
-    # 3. FIX: La maschera soft lavora finalmente sui pixel dell'immagine reale
-    soft_mask_pred   = torch.sigmoid((pred_clamped - noise_threshold) * 50.0)
-    soft_mask_target = torch.sigmoid((data_clamped - noise_threshold) * 50.0) # <--- CORRETTO
-
-    pred_npix   = torch.sum(soft_mask_pred, dim=[1, 2, 3])
-    target_npix = torch.sum(soft_mask_target, dim=[1, 2, 3])
-
-    # 4. Costruzione del tensore delle feature (Espanso a 6 Dimensioni includendo il raggio)
+    # --- COSTRUZIONE DELLE FEATURE FISICHE A 5 DIMENSIONI (Escluso il Picco) ---
     pred_physics_feat = torch.stack([
         torch.log10(pred_scalars[:, 0] + 1.0),   # 0. Log-Integral
         pred_scalars[:, 1] / 10.0,               # 1. Length
         pred_scalars[:, 2] / 10.0,               # 2. Width
-        pred_npix / 100.0,                       # 3. Soft N_pix
-        pred_scalars[:, 5] * 10.0,               # 4. Relative Peak
-        rg_pred / 10.0                           # 5. Raggio di girazione (Unpaired geometrico)
+        pred_scalars[:, 3] / 100.0,              # 3. Soft N_pix (preso direttamente dalla funzione)
+        rg_pred / 10.0                           # 4. Raggio di girazione
     ], dim=1)
 
     target_physics_feat = torch.stack([
-        torch.log10(target_scalars_clamped[:, 0] + 1.0),
-        target_scalars_clamped[:, 1] / 10.0,
-        target_scalars_clamped[:, 2] / 10.0,
-        target_npix / 100.0,
-        target_scalars_clamped[:, 5] * 10.0,
-        rg_data / 10.0                           # <--- Inserito qui coerentemente
+        torch.log10(target_scalars[:, 0] + 1.0),
+        target_scalars[:, 1] / 10.0,
+        target_scalars[:, 2] / 10.0,
+        target_scalars[:, 3] / 100.0,
+        rg_data / 10.0                           
     ], dim=1)
             
+    # MMD globale sulle correlazioni fisiche
     L_mmd_physics = compute_mmd_rbf(pred_physics_feat, target_physics_feat)
-    L_integral    = F.mse_loss(pred_physics_feat[:, 0].mean(), target_physics_feat[:, 0].mean())
-    L_transport   = (delta_h.pow(2)).mean()
-    L_centroid    = compute_centroid_loss(sim_images, pred_clamped)
+    
+    # 4. FIX SULL'INTEGRALE: Sliced Wasserstein (Sorting Trick) per lo spettro 1D
+    pred_int_sorted, _   = torch.sort(pred_physics_feat[:, 0])
+    target_int_sorted, _ = torch.sort(target_physics_feat[:, 0])
+    L_integral = F.mse_loss(pred_int_sorted, target_int_sorted)
+
+    # Altre componenti
+    L_transport   = delta_h.abs().mean() 
+    L_centroid    = compute_centroid_loss(sim_images, pred_clamped) if sim_images is not None else 0.0
 
     # Combinazione lineare finale
     loss = (
@@ -535,11 +526,11 @@ def compute_cygno_loss(
     loss_dict = {
         "total": loss.item(),
         "mmd_shape_1d": loss_weights["mmd_shape_1d"] * L_mmd_shape_1d.item(),
-        "shape_anchor": loss_weights["shape_anchor"] * L_pixel_shape_anchor.item(),        
+        "shape_anchor": loss_weights["shape_anchor"] * L_pixel_shape_anchor.item() if sim_images is not None else 0.0,        
         "mmd_physics": loss_weights["mmd_physics"] * L_mmd_physics.item(),
         "integral": loss_weights["integral"] * L_integral.item(),
         "transport": loss_weights["transport"] * L_transport.item(),
-        "centroid": loss_weights["centroid"] * L_centroid.item(),
+        "centroid": loss_weights["centroid"] * L_centroid.item() if sim_images is not None else 0.0,
         "radial": loss_weights["radial"] * L_mmd_radial.item()
     }
     return loss, loss_dict
@@ -579,19 +570,14 @@ def train_epoch(model, loader, optimizer, loss_weights, device="mps", max_batche
             s_cond = sim_cond[b].unsqueeze(0).repeat(N, 1)
             d_cond = data_cond[b].unsqueeze(0).repeat(N, 1)
             s_scal = sim_scalars_phys[b]
-            d_scal = data_scalars_phys[b]
 
             out = model(s_img, s_cond, d_cond, s_scal)
             pred_img = out["pred_images"]
-            pred_img_clamped = F.relu(pred_img)
-            pred_scalars_phys = compute_physical_scalars_from_image(pred_img_clamped)
-
             out_identity = model(s_img, s_cond, s_cond, s_scal)
             
             loss_evento, info_evento = compute_cygno_loss(
-                pred=pred_img, pred_scalars=pred_scalars_phys, target_scalars=d_scal, #nota: non pred_img_clamped perche' lo fa gia' nella loss
-                delta_h=out["delta_h"], pred_identity=out_identity["pred_images"],
-                sim_images=s_img, data_images=d_img, loss_weights=loss_weights
+                pred_img, out["delta_h"], loss_weights,
+                pred_identity=out_identity["pred_images"], sim_images=s_img, data_images=d_img
             )
             
             loss_batch_accumulata += loss_evento / B
@@ -785,7 +771,7 @@ def train_model(inputfile, outputfile, checkpoint_path=None, epochs=50):
             optimizer,
             gammas,
             device=device,
-            max_batches=100
+            max_batches=50
         )
 
         for k in train_history:

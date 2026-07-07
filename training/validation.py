@@ -109,21 +109,21 @@ def run_validation_sweep_from_dict(
                 torch_sim_mask = torch.from_numpy(sim_mask).to(sim_images.device)
                 matched_sim = sim_images[torch_sim_mask]
                 matched_cond = sim_cond[torch_sim_mask]
-                
+
                 B_s, N_s, H_s, W_s = matched_sim.shape
                 sim_flat = matched_sim.view(B_s * N_s, 1, H_s, W_s)
                 
+                # Preparazione condizioni (stessa logica del training)
                 sim_cond_flat = matched_cond[:, None, :].repeat(1, N_s, 1).view(B_s * N_s, 3)
                 target_cond_tensor = torch.tensor([[z_val, target_P, target_T, target_H]], dtype=torch.float32).to(device)
                 target_cond_flat = target_cond_tensor.repeat(B_s * N_s, 1)
                 
+                # Estrazione scalari sim (Input al modello)
                 sim_scalars_flat = compute_physical_scalars_from_image(sim_flat)
-                
+
+                # Forward pass (Stessa attivazione del training!)
                 out = model(sim_flat, sim_cond_flat, target_cond_flat, sim_scalars_flat)
-                pred_clamped_flat = F.elu(out["pred_images"]) + 1.0
-                
-                # SOGLIA RUMORE COME NEL PLOT DEI CLUSTER (0.2 o il tuo threshold reale)
-                pred_clamped_flat = torch.where(pred_clamped_flat > 0.2, pred_clamped_flat, torch.zeros_like(pred_clamped_flat))
+                pred_clamped_flat = F.relu(out["pred_images"])
                 
                 pred_scalars = compute_physical_scalars_from_image(pred_clamped_flat)
                 
@@ -144,8 +144,10 @@ def run_validation_sweep_from_dict(
     # L'indice deriva dall'ordine in compute_physical_scalars_from_image:
     # 0:Integral, 1:Length, 2:Width, 3:Density, 4:Eccentricity, 5:Relative_Peak, 6:Skewness
     plot_configs = [
-        ("Macro_Shape", [("Integral (counts)", 0), ("Width (pix)", 2), (r"Eccentricity ($\sqrt{1 - \left(\frac{w}{l}\right)^2}$)", 4)]),
-        ("Micro_Topology", [(r"Density ($\delta$)", 3), ("Relative peak (Max/Integral)", 5), ("Skewness", 6)])
+        # ("Macro_Shape", [("Integral (counts)", 0), ("Width (pix)", 2), (r"Eccentricity ($\sqrt{1 - \left(\frac{w}{l}\right)^2}$)", 4)]),
+        # ("Micro_Topology", [(r"Density ($\delta$)", 3), ("Relative peak (Max/Integral)", 5), ("Skewness", 6)])
+        ("Macro_Shape", [("Integral (counts)", 0), ("Length (pix)", 1), ("Width (pix)", 2)]),
+        ("Micro_Topology", [(r"Density ($\delta$)", 6), ("Relative peak (Max/Integral)", 5), ("$n_{pix}$", 3)])
     ]
 
     for fig_name, var_setup in plot_configs:
