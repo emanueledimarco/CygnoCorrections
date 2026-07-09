@@ -289,12 +289,18 @@ def compute_physical_scalars_from_image(images, eps=1e-4, noise_threshold=noise_
     # Area differenziabile tramite il soft counting della sigmoide
     soft_area = torch.sum(soft_mask, dim=[1, 2]) + eps
     density = integrals_core_safe / soft_area
+    density_raw = integrals / soft_area
     
     # L'eccentricità eredita la stabilità dei nuovi autovalori del core
     eccentricity_arg = torch.clamp(1.0 - (lambda_min / (lambda_max + eps)), min=0.0)
     eccentricity = torch.sqrt(eccentricity_arg + eps)
+
+    # --- VECCHIO ---
+    # max_pixel = imgs.view(L_batch, -1).max(dim=1)[0]
     
-    max_pixel = imgs.view(L_batch, -1).max(dim=1)[0]
+    # --- NUOVO: Media dei 5 pixel più luminosi ---
+    k_pixels = 5
+    max_pixel = torch.topk(imgs.view(L_batch, -1), k=k_pixels, dim=1)[0].mean(dim=1)
     relative_peak = max_pixel / integrals_safe
     
     # Skewness ricalcolata sul profilo del core lungo l'asse maggiore
@@ -308,7 +314,8 @@ def compute_physical_scalars_from_image(images, eps=1e-4, noise_threshold=noise_
     mu_3 = torch.sum(imgs_core * (u ** 3), dim=[1, 2]) / integrals_core_safe
     sigma_3 = torch.clamp(lambda_max, min=0.0)**1.5 + eps
     skewness = torch.abs(mu_3 / sigma_3)
-    
+
+    #                     0           1       2        3          4             5             6        7
     return torch.stack([integrals, lengths, widths, soft_area, eccentricity, relative_peak, density, skewness], dim=1)
 
 def compute_centroids(images, eps=1e-4):
@@ -482,14 +489,20 @@ def compute_cygno_loss(
         loss_pixel_matrix = F.smooth_l1_loss(pred_n, sim_n, beta=0.01, reduction='none')
         weight_mask = (sim_n / (sim_n.mean(dim=(-1, -2), keepdim=True) + 1e-8)).detach()
         L_pixel_shape_anchor = (loss_pixel_matrix * weight_mask).mean()
-    
+        
     # --- COSTRUZIONE DELLE FEATURE FISICHE A 5 DIMENSIONI (Escluso il Picco) ---
+    pred_rel_peak = pred_scalars[:, 5]
+    target_rel_peak = target_scalars[:, 5]
+
     pred_physics_feat = torch.stack([
         torch.log10(pred_scalars[:, 0] + 1.0),   # 0. Log-Integral
         pred_scalars[:, 1] / 10.0,               # 1. Length
         pred_scalars[:, 2] / 10.0,               # 2. Width
         pred_scalars[:, 3] / 100.0,              # 3. Soft N_pix (preso direttamente dalla funzione)
-        rg_pred / 10.0                           # 4. Raggio di girazione
+        rg_pred / 10.0,                          # 4. Raggio di girazione
+        pred_scalars[:, 6] / 10.0,               # 5. DENSITÀ
+        pred_scalars[:, 4],                      # 6. NUOVO: Eccentricity (già 0-1)
+        pred_scalars[:, 5] * 100.0               # 7. NUOVO: Relative Peak (scalato x100)
     ], dim=1)
 
     target_physics_feat = torch.stack([
@@ -497,7 +510,10 @@ def compute_cygno_loss(
         target_scalars[:, 1] / 10.0,
         target_scalars[:, 2] / 10.0,
         target_scalars[:, 3] / 100.0,
-        rg_data / 10.0                           
+        rg_data / 10.0,
+        target_scalars[:, 6] / 10.0,
+        target_scalars[:, 4],                    
+        target_scalars[:, 5] * 100.0             
     ], dim=1)
             
     # MMD globale sulle correlazioni fisiche
@@ -508,6 +524,34 @@ def compute_cygno_loss(
     target_int_sorted, _ = torch.sort(target_physics_feat[:, 0])
     L_integral = F.mse_loss(pred_int_sorted, target_int_sorted)
 
+    # =====================================================================
+    # 5. NUOVO FIX SU GEOMETRIA (Length & Width): Sorting Trick 1D
+    # =====================================================================
+    # Estrai e ordina la feature 1: Length
+    pred_len_sorted, _   = torch.sort(pred_physics_feat[:, 1])
+    target_len_sorted, _ = torch.sort(target_physics_feat[:, 1])
+    # Nota: F.l1_loss calcola la vera Wasserstein-1, F.mse_loss è legata alla Wasserstein-2.
+    # Per la forma degli istogrammi, l'L1 è spesso più robusta contro gli outlier (i doppi cluster).
+    L_length = F.l1_loss(pred_len_sorted, target_len_sorted)
+
+    # Estrai e ordina la feature 2: Width
+    pred_wid_sorted, _   = torch.sort(pred_physics_feat[:, 2])
+    target_wid_sorted, _ = torch.sort(target_physics_feat[:, 2])
+    L_width = F.l1_loss(pred_wid_sorted, target_wid_sorted)
+
+    # --- Sorting su Eccentricity ---
+    pred_ecc_sorted, _   = torch.sort(pred_physics_feat[:, 6])
+    target_ecc_sorted, _ = torch.sort(target_physics_feat[:, 6])
+    L_eccentricity = F.l1_loss(pred_ecc_sorted, target_ecc_sorted)
+
+    # --- Sorting su Relative Peak ---
+    pred_peak_sorted, _  = torch.sort(pred_physics_feat[:, 7])
+    target_peak_sorted, _ = torch.sort(target_physics_feat[:, 7])
+    L_rel_peak = F.l1_loss(pred_peak_sorted, target_peak_sorted)
+    
+    # Combina le loss geometriche 1D
+    L_geometry_1d = L_length + L_width + L_eccentricity + L_rel_peak
+    
     # Altre componenti
     L_transport   = delta_h.abs().mean() 
     L_centroid    = compute_centroid_loss(sim_images, pred_clamped) if sim_images is not None else 0.0
@@ -518,6 +562,7 @@ def compute_cygno_loss(
         loss_weights["shape_anchor"] * L_pixel_shape_anchor +
         loss_weights["mmd_physics"] * L_mmd_physics +
         loss_weights["integral"] * L_integral +
+        loss_weights["geometry_1d"] * L_geometry_1d +
         loss_weights["transport"] * L_transport +
         loss_weights["centroid"] * L_centroid +
         loss_weights["radial"] * L_mmd_radial
@@ -529,6 +574,7 @@ def compute_cygno_loss(
         "shape_anchor": loss_weights["shape_anchor"] * L_pixel_shape_anchor.item() if sim_images is not None else 0.0,        
         "mmd_physics": loss_weights["mmd_physics"] * L_mmd_physics.item(),
         "integral": loss_weights["integral"] * L_integral.item(),
+        "geometry_1d": loss_weights["geometry_1d"] * L_geometry_1d.item(),
         "transport": loss_weights["transport"] * L_transport.item(),
         "centroid": loss_weights["centroid"] * L_centroid.item() if sim_images is not None else 0.0,
         "radial": loss_weights["radial"] * L_mmd_radial.item()
@@ -598,13 +644,14 @@ def get_loss_weights(epoch, total_epochs):
         # Riportiamo le loss geometriche a O(100) nei valori pesati
         "mmd_shape_1d": [15000.0, 10000.0],  # Alza drasticamente (lavora sulle medie delle diagonali)
         "radial":       [15000.0, 10000.0],  # Riporta su: la media radiale ha valori piccoli, serve un peso forte!
+        "geometry_1d":  [100.0, 100.0],
         
         # Consistenza con la SIM pixel-by-pixel
         "shape_anchor": [4000.0, 1000.0],   # Lascialo deciso all'inizio per dare stabilità geometrica
         "centroid":     [10.0, 10.0],
         
         # Calibriamo la fisica per farla partire a O(50) invece che a 500
-        "mmd_physics":  [5.0, 50.0],        # Abbassato il punto di partenza per non monopolizzare l'inizio del training
+        "mmd_physics":  [5.0, 50.0],        # Sale gradualmente per blindare le correlazioni joint stabili
         "integral":     [1500.0, 1500.0],   
         
         "transport":    [0.5, 0.5],        
@@ -698,7 +745,7 @@ def build_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=make_cygno_collate_fn(dataset)
     )
 
@@ -750,6 +797,7 @@ def train_model(inputfile, outputfile, checkpoint_path=None, epochs=50):
         "mmd_shape_1d": [],
         "mmd_physics": [],
         "integral": [],
+        "geometry_1d": [],
         "transport": [],
         "centroid": [],
         "radial": [],
@@ -1009,9 +1057,9 @@ def test_training(
             test_datas.append(batch["data_images"][0, 0].cpu())
 
             # Prendiamo il primo elemento del batch (indice 0)
-            sim_label = f" z={sim_cond[0, 0].item():.1f}cm,\n$\\alpha$={sim_cond[0, 1].item():.2f},\n$\\lambda$={sim_cond[0, 1]:.2f}mm)"
+            sim_label = f" z={sim_cond[0, 0].item():.1f}cm,\n$\\alpha$={sim_cond[0, 1].item():.4f},\n$\\lambda$={sim_cond[0, 2]:.0f}mm)"
             test_cond_sim_labels.append(sim_label)
-            data_label = f" z={data_cond[0, 0].item():.1f}cm,\nP={data_cond[0, 1].item():.3f}bar,\nT={data_cond[0, 2].item():.1f},\nH={data_cond[0, 3].item():.1f}?"
+            data_label = f" z={data_cond[0, 0].item():.1f}cm,\nP={data_cond[0, 1].item():.3f}bar,\nT={data_cond[0, 2].item():.1f},\nH={data_cond[0, 3].item():.1f}ppk"
             test_cond_data_labels.append(data_label)
             
     # Ora disegnamo le 10 colonne, ognuna corrispondente a un BATCH differente

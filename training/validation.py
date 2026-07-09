@@ -94,8 +94,9 @@ def run_validation_sweep_from_dict(
                 matched_data = data_images[torch.from_numpy(data_mask).to(data_images.device)]
                 B_d, N_d, H_d, W_d = matched_data.shape
                 data_flat = matched_data.view(B_d * N_d, 1, H_d, W_d)
+                data_clamped_flat = F.relu(data_flat)
                 # Adesso restituisce un tensore con 7 indici
-                data_scalars = compute_physical_scalars_from_image(data_flat)
+                data_scalars = compute_physical_scalars_from_image(data_clamped_flat)
                 all_data_scalars_dict[row_key].append(data_scalars.cpu().numpy())
 
             # --- GENERAZIONE MODELLO (SIM -> PRED) ---
@@ -147,7 +148,7 @@ def run_validation_sweep_from_dict(
         # ("Macro_Shape", [("Integral (counts)", 0), ("Width (pix)", 2), (r"Eccentricity ($\sqrt{1 - \left(\frac{w}{l}\right)^2}$)", 4)]),
         # ("Micro_Topology", [(r"Density ($\delta$)", 3), ("Relative peak (Max/Integral)", 5), ("Skewness", 6)])
         ("Macro_Shape", [("Integral (counts)", 0), ("Length (pix)", 1), ("Width (pix)", 2)]),
-        ("Micro_Topology", [(r"Density ($\delta$)", 6), ("Relative peak (Max/Integral)", 5), ("$n_{pix}$", 3)])
+        ("Micro_Topology", [("$n_{pix}$", 3), (r"Eccentricity ($\sqrt{1 - \left(\frac{w}{l}\right)^2}$)", 4), ("Relative peak (Max/Integral)", 5)])
     ]
 
     for fig_name, var_setup in plot_configs:
@@ -211,7 +212,7 @@ def run_validation_sweep_from_dict(
                 if row_idx == 0:
                     ax.set_title(scalar_name, fontweight='bold', fontsize=12)
                 if col_idx == 0:
-                    ax.set_ylabel(f"{sweep_var} = {current_val}\nP={target_P}bar, T={target_T}C, H={target_H}?\n\nClusters", rotation=90, labelpad=10, fontsize=10)
+                    ax.set_ylabel(f"P={target_P}bar, T={target_T}C, H={target_H}ppk\n\nClusters", rotation=90, labelpad=10, fontsize=13)
                 
                 ax.legend(fontsize=8, loc='upper right')
                 ax.grid(True, alpha=0.2, linestyle='--')
